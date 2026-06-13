@@ -68,7 +68,7 @@ def get_stage_counts():
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute("""
         SELECT stage, COUNT(*) FROM jobs
-        WHERE status NOT IN ('pending', 'skipped', 'approved')
+        WHERE status NOT IN ('pending', 'skipped', 'approved', 'failed')
         GROUP BY stage
     """).fetchall()
     conn.close()

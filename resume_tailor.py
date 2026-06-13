@@ -69,7 +69,8 @@ async def fetch_job_description(url, session_file):
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             )
             if cookies:
-                await context.add_cookies(cookies)
+                cookie_list = cookies["cookies"] if isinstance(cookies, dict) and "cookies" in cookies else cookies
+                await context.add_cookies(cookie_list)
             page = await context.new_page()
             await page.goto(url, wait_until="domcontentloaded")
             await page.wait_for_timeout(3000)

@@ -389,7 +389,7 @@ async def resolve_post_url(page, post):
 
 
 async def comment_on_post(page, post, comment_text):
-    """Navigate to post permalink and submit a comment."""
+    """Navigate to post permalink and submit a comment via browser clipboard paste."""
     try:
         post_url = await resolve_post_url(page, post)
         if not post_url:
@@ -398,51 +398,73 @@ async def comment_on_post(page, post, comment_text):
 
         await page.goto(post_url, wait_until="domcontentloaded")
         await page.wait_for_timeout(4000)
+        await page.evaluate("window.scrollBy(0, 500)")
+        await page.wait_for_timeout(1000)
 
-        # Click enabled Comment button
-        comment_btn = None
-        for btn in await page.get_by_role("button", name="Comment").all():
-            if await btn.is_enabled():
-                comment_btn = btn
-                break
+        # Open the comment editor — button label is "Comment" in LinkedIn's UI
+        comment_btn = await page.evaluate("""() => {
+            for (const btn of document.querySelectorAll('button')) {
+                if (btn.innerText.trim() === 'Comment' && !btn.disabled) {
+                    btn.click();
+                    return true;
+                }
+            }
+            return false;
+        }""")
         if not comment_btn:
-            print(f"  No enabled Comment button for post by {post['author_name']}")
+            print(f"  No Comment button found for post by {post['author_name']}")
             return False
-
-        await comment_btn.click()
         await page.wait_for_timeout(2000)
 
-        # LinkedIn comment box is a contenteditable div
+        # Find contenteditable editor
         editor = page.locator('[contenteditable="true"]').first
         if not await editor.is_visible():
             print(f"  Comment editor not visible for post by {post['author_name']}")
             return False
-
         await editor.click()
         await page.wait_for_timeout(500)
 
-        # Type each character and dispatch input events so React enables Submit
-        await editor.fill("")
-        for char in comment_text:
-            await page.keyboard.type(char, delay=25)
-        await page.wait_for_timeout(1000)
+        # Paste via browser clipboard — the only method that triggers React's EditorState update
+        await page.evaluate(f"navigator.clipboard.writeText({json.dumps(comment_text)})")
+        await page.keyboard.press('Meta+v')
+        await page.wait_for_timeout(1500)
 
-        # Submit — LinkedIn uses a "Submit" button (enabled after typing)
-        submit_btn = page.get_by_role("button", name="Submit")
-        try:
-            await submit_btn.wait_for(state="visible", timeout=5000)
-            if await submit_btn.is_enabled():
-                await submit_btn.click()
-                await page.wait_for_timeout(2000)
-                print(f"  ✅ Commented on post by {post['author_name']}")
-                return True
-        except Exception:
-            pass
+        # Verify text landed
+        content = await editor.inner_text()
+        if not content.strip():
+            print(f"  Paste failed for {post['author_name']} — editor empty")
+            return False
 
-        # Fallback: Ctrl+Enter to submit
+        # Click the submit "Comment" button inside the form
+        # It sits alongside Emoji/GIF/Photo buttons, 6 levels above the editor
+        clicked = await page.evaluate("""() => {
+            const editor = document.querySelector('[contenteditable="true"]');
+            if (!editor) return false;
+            let el = editor;
+            for (let i = 0; i < 12; i++) {
+                el = el.parentElement;
+                if (!el) break;
+                for (const btn of el.querySelectorAll('button')) {
+                    const txt = btn.innerText.trim();
+                    const lbl = btn.getAttribute('aria-label') || '';
+                    if ((txt === 'Comment' || lbl === 'Comment') && !btn.disabled) {
+                        btn.click();
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }""")
+
+        await page.wait_for_timeout(2500)
+        if clicked:
+            print(f"  ✅ Commented on post by {post['author_name']}")
+            return True
+
+        # Fallback: Ctrl+Enter
         await page.keyboard.press("Control+Return")
         await page.wait_for_timeout(2000)
-        print(f"  ✅ Commented (via keyboard) on post by {post['author_name']}")
+        print(f"  ✅ Commented (Ctrl+Enter) on post by {post['author_name']}")
         return True
 
     except Exception as e:
@@ -530,6 +552,7 @@ async def handle_feed_action(post_id, action):
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 800},
+            permissions=["clipboard-read", "clipboard-write"],
         )
         await context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
@@ -606,6 +629,7 @@ async def scan_feed():
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 800},
+            permissions=["clipboard-read", "clipboard-write"],
         )
         await context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"

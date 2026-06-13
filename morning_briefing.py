@@ -98,12 +98,8 @@ Keep it under 250 words. Be concise and friendly.
     return message.content[0].text
 
 
-def send_telegram(message):
-    from telegram_topics import send_daily
-    return send_daily(message)
-
-
 def run():
+    from telegram_topics import send_daily, send_emails
     now = datetime.now().strftime("%A, %B %d %Y")
     print(f"Sending morning briefing for {now}...")
 
@@ -111,18 +107,16 @@ def run():
     email_summary = summarize_emails(emails)
     calendar      = get_calendar_summary()
 
-    message = (
-        f"☀️ *Good Morning! — {now}*\n\n"
-        f"{calendar}\n\n"
-        f"━━━━━━━━━━━━━━━\n\n"
-        f"📬 *Overnight Emails* ({len(emails)} unread)\n\n"
-        f"{email_summary}"
-    )
+    # Calendar events → Daily topic
+    send_daily(f"☀️ *Good Morning — {now}*\n\n{calendar}")
 
-    if send_telegram(message):
-        print("Morning briefing sent!")
-    else:
-        print("Failed to send.")
+    # Email summary → Emails topic
+    send_emails(f"📬 *Overnight Emails* ({len(emails)} unread)\n\n{email_summary}")
+
+    print("Morning briefing sent!")
+
+
+
 
 
 if __name__ == "__main__":

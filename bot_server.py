@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Personal AI Assistant — Telegram bot server.
+Bunty — Akshay's personal AI assistant Telegram bot.
 Runs continuously, responds to messages via Claude, and accepts commands.
 """
 
@@ -45,7 +45,7 @@ TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 # Conversation history for context (last 20 messages)
 conversation_history = []
 
-SYSTEM_PROMPT = """You are Akshay Mittapally's personal AI assistant. Here's everything you know about him:
+SYSTEM_PROMPT = """You are Bunty, Akshay Mittapally's personal AI assistant. Here's everything you know about him:
 
 PERSONAL:
 - Full name: Akshay Mittapally (LinkedIn: Akshay M, He/Him)
@@ -129,7 +129,13 @@ def get_updates(offset=None):
     if offset:
         params["offset"] = offset
     resp = requests.get(f"{TELEGRAM_API}/getUpdates", params=params, timeout=35)
-    return resp.json() if resp.ok else {"result": []}
+    if not resp.ok:
+        data = resp.json()
+        if data.get("error_code") == 409:
+            print("409 Conflict — another instance running, waiting 60s...")
+            time.sleep(60)
+        return {"result": []}
+    return resp.json()
 
 
 def is_authorized(msg):
@@ -141,27 +147,273 @@ def is_authorized(msg):
     return chat_id == TELEGRAM_CHAT or chat_id == str(GROUP_ID) or chat_type in ("group", "supergroup")
 
 
+TOOLS = [
+    {
+        "name": "create_calendar_event",
+        "description": "Create a Google Calendar event for Akshay. If attendee emails are provided, send them a Google Meet invite. Always add a Google Meet link when scheduling a meeting with other people.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title":      {"type": "string", "description": "Event title"},
+                "date":       {"type": "string", "description": "Date in YYYY-MM-DD format"},
+                "start_time": {"type": "string", "description": "Start time in HH:MM 24h format"},
+                "end_time":   {"type": "string", "description": "End time in HH:MM 24h format"},
+                "location":   {"type": "string", "description": "Optional physical location"},
+                "attendees":  {"type": "array", "items": {"type": "string"}, "description": "List of attendee email addresses — they will receive a Google Meet invite"},
+                "add_meet":   {"type": "boolean", "description": "Add a Google Meet video link (default true when attendees present)"}
+            },
+            "required": ["title", "date", "start_time", "end_time"]
+        }
+    },
+    {
+        "name": "list_calendar_events",
+        "description": "List Akshay's upcoming calendar events.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "How many days ahead to look (default 7)"}
+            }
+        }
+    },
+    {
+        "name": "delete_calendar_event",
+        "description": "Delete a calendar event by title (and optional date).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "date":  {"type": "string", "description": "YYYY-MM-DD, optional"}
+            },
+            "required": ["title"]
+        }
+    },
+    {
+        "name": "get_job_applications",
+        "description": "Get Akshay's job application pipeline from the database.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "stage": {"type": "string", "description": "Filter by stage: applied, phone_screen, interview, offer, rejected. Leave empty for all."}
+            }
+        }
+    },
+    {
+        "name": "fetch_emails",
+        "description": "Fetch and summarize Akshay's recent Gmail emails.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "hours": {"type": "integer", "description": "How many hours back to look (default 2)"}
+            }
+        }
+    },
+    {
+        "name": "check_stocks",
+        "description": "Trigger a stock drop check for Akshay's watchlist.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "add_stock",
+        "description": "Add a stock ticker to Akshay's watchlist.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Stock ticker symbol e.g. AAPL, TSLA"}
+            },
+            "required": ["ticker"]
+        }
+    },
+    {
+        "name": "remove_stock",
+        "description": "Remove a stock ticker from Akshay's watchlist.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Stock ticker symbol to remove"}
+            },
+            "required": ["ticker"]
+        }
+    },
+    {
+        "name": "list_stocks",
+        "description": "List all stocks currently in Akshay's watchlist.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "search_jobs",
+        "description": "Search LinkedIn for new Easy Apply jobs matching Akshay's profile.",
+        "input_schema": {"type": "object", "properties": {}}
+    }
+]
+
+
+def execute_tool(name, params):
+    """Run a tool and return a string result."""
+    try:
+        if name == "create_calendar_event":
+            from calendar_bot import get_calendar_service
+            import uuid
+            svc = get_calendar_service()
+            date = params["date"]
+            attendees = params.get("attendees") or []
+            add_meet = params.get("add_meet", bool(attendees))
+            event = {
+                "summary": params["title"],
+                "start": {"dateTime": f"{date}T{params['start_time']}:00", "timeZone": "America/Los_Angeles"},
+                "end":   {"dateTime": f"{date}T{params['end_time']}:00",   "timeZone": "America/Los_Angeles"},
+            }
+            if params.get("location"):
+                event["location"] = params["location"]
+            if attendees:
+                event["attendees"] = [{"email": e} for e in attendees]
+            if add_meet:
+                event["conferenceData"] = {
+                    "createRequest": {"requestId": str(uuid.uuid4()), "conferenceSolutionKey": {"type": "hangoutsMeet"}}
+                }
+            created = svc.events().insert(
+                calendarId="primary", body=event,
+                conferenceDataVersion=1 if add_meet else 0,
+                sendUpdates="all" if attendees else "none"
+            ).execute()
+            meet_link = created.get("hangoutLink") or (created.get("conferenceData") or {}).get("entryPoints", [{}])[0].get("uri", "")
+            result = f"✅ Created: *{created['summary']}* on {date} {params['start_time']}–{params['end_time']}"
+            if meet_link:
+                result += f"\n🎥 Meet link: {meet_link}"
+            if attendees:
+                result += f"\n📧 Invites sent to: {', '.join(attendees)}"
+            return result
+
+        elif name == "list_calendar_events":
+            from calendar_bot import get_calendar_summary
+            from telegram_topics import send_daily
+            summary = get_calendar_summary()
+            send_daily(summary)
+            return "📅 Calendar posted to Daily topic."
+
+        elif name == "delete_calendar_event":
+            from calendar_bot import get_calendar_service
+            from datetime import datetime, timezone, timedelta
+            svc = get_calendar_service()
+            now = datetime.now(timezone.utc)
+            result = svc.events().list(
+                calendarId="primary", timeMin=now.isoformat(),
+                timeMax=(now + timedelta(days=60)).isoformat(),
+                singleEvents=True, orderBy="startTime", maxResults=50
+            ).execute()
+            title_lower = params["title"].lower()
+            date_filter = params.get("date", "")
+            for e in result.get("items", []):
+                if title_lower in e.get("summary", "").lower():
+                    start = e["start"].get("dateTime", e["start"].get("date", ""))
+                    if not date_filter or date_filter in start:
+                        svc.events().delete(calendarId="primary", eventId=e["id"]).execute()
+                        return f"✅ Deleted: {e['summary']}"
+            return f"❌ No event found matching '{params['title']}'"
+
+        elif name == "get_job_applications":
+            from job_tracker import format_status_report
+            return format_status_report()
+
+        elif name == "fetch_emails":
+            from email_bot import fetch_recent_emails, summarize_with_claude
+            emails = fetch_recent_emails(hours=params.get("hours", 2))
+            return summarize_with_claude(emails)
+
+        elif name == "check_stocks":
+            subprocess.Popen(
+                ["/Library/Frameworks/Python.framework/Versions/3.11/bin/python3",
+                 "/Users/akshayreddy/Akshay/stockspredictor/stock_alerts.py"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            return "📊 Stock check triggered — results coming to Stocks topic shortly."
+
+        elif name == "add_stock":
+            import sqlite3
+            ticker = params["ticker"].upper().strip()
+            db = "/Users/akshayreddy/Akshay/stockspredictor/stocks_vanguard.db"
+            conn = sqlite3.connect(db)
+            existing = conn.execute("SELECT ticker FROM favorites WHERE ticker=?", (ticker,)).fetchone()
+            if existing:
+                conn.close()
+                return f"📊 {ticker} is already in your watchlist."
+            conn.execute("INSERT INTO favorites (ticker) VALUES (?)", (ticker,))
+            conn.commit()
+            conn.close()
+            return f"✅ Added *{ticker}* to your stock watchlist."
+
+        elif name == "remove_stock":
+            import sqlite3
+            ticker = params["ticker"].upper().strip()
+            db = "/Users/akshayreddy/Akshay/stockspredictor/stocks_vanguard.db"
+            conn = sqlite3.connect(db)
+            deleted = conn.execute("DELETE FROM favorites WHERE ticker=?", (ticker,)).rowcount
+            conn.commit()
+            conn.close()
+            if deleted:
+                return f"✅ Removed *{ticker}* from your watchlist."
+            return f"❌ {ticker} wasn't in your watchlist."
+
+        elif name == "list_stocks":
+            import sqlite3
+            db = "/Users/akshayreddy/Akshay/stockspredictor/stocks_vanguard.db"
+            conn = sqlite3.connect(db)
+            tickers = [r[0] for r in conn.execute("SELECT ticker FROM favorites ORDER BY ticker").fetchall()]
+            conn.close()
+            if tickers:
+                return "📊 Your watchlist: " + ", ".join(tickers)
+            return "📊 Your watchlist is empty."
+
+        elif name == "search_jobs":
+            subprocess.Popen(
+                ["/Library/Frameworks/Python.framework/Versions/3.11/bin/python3",
+                 "/Users/akshayreddy/email_assistant/linkedin_apply.py", "find"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            return "🔍 Job search triggered — results coming to Jobs topic shortly."
+
+        return f"Unknown tool: {name}"
+
+    except Exception as e:
+        return f"Tool error ({name}): {e}"
+
+
 def ask_claude(user_message):
-    """Send message to Claude and get a response."""
+    """Send message to Claude with tool use support — agentic loop."""
     global conversation_history
 
     conversation_history.append({"role": "user", "content": user_message})
-
-    # Keep last 20 messages for context
     if len(conversation_history) > 20:
         conversation_history = conversation_history[-20:]
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=512,
-        system=SYSTEM_PROMPT,
-        messages=conversation_history
-    )
 
-    reply = response.content[0].text
-    conversation_history.append({"role": "assistant", "content": reply})
-    return reply
+    while True:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system=SYSTEM_PROMPT,
+            tools=TOOLS,
+            messages=conversation_history
+        )
+
+        if response.stop_reason == "tool_use":
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    result = execute_tool(block.name, block.input)
+                    print(f"[tool] {block.name}({block.input}) → {str(result)[:80]}")
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": str(result)
+                    })
+            conversation_history.append({"role": "assistant", "content": response.content})
+            conversation_history.append({"role": "user", "content": tool_results})
+
+        else:
+            reply = next((b.text for b in response.content if hasattr(b, "text")), "Done.")
+            conversation_history.append({"role": "assistant", "content": reply})
+            return reply
 
 
 def handle_command(text):
@@ -169,10 +421,13 @@ def handle_command(text):
     cmd = text.lower().strip()
 
     if cmd == "/start":
-        return "👋 Hey Akshay! I'm your personal assistant. Ask me anything or use:\n\n/schedule — today's calendar\n/emails — check recent emails\n/help — show all commands"
+        return "👋 Hey Akshay! I'm Bunty, your personal assistant. Ask me anything or use:\n\n/schedule — today's calendar\n/emails — check recent emails\n/help — show all commands"
 
     if cmd == "/schedule":
-        return get_calendar_summary()
+        summary = get_calendar_summary()
+        from telegram_topics import send_daily
+        send_daily(summary)
+        return "📅 Calendar posted to Daily topic!"
 
     if cmd == "/emails":
         try:
@@ -257,16 +512,42 @@ def handle_command(text):
         except Exception as e:
             return f"⚠️ Error: {e}"
 
+    if cmd == "/autoapply":
+        try:
+            log_file = open("/Users/akshayreddy/email_assistant/bot.log", "a")
+            subprocess.Popen(
+                ["/Library/Frameworks/Python.framework/Versions/3.11/bin/python3", "-u",
+                 "/Users/akshayreddy/email_assistant/linkedin_apply.py", "autoapply"],
+                stdout=log_file, stderr=log_file
+            )
+            return "🤖 Auto-applying to all new Easy Apply jobs — no approval needed! Updates coming shortly."
+        except Exception as e:
+            return f"⚠️ Error: {e}"
+
+    if cmd == "/digest":
+        try:
+            subprocess.Popen(
+                ["/Library/Frameworks/Python.framework/Versions/3.11/bin/python3",
+                 "/Users/akshayreddy/email_assistant/tech_digest.py"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            return "📰 Fetching today's tech digest... posting to Daily shortly!"
+        except Exception as e:
+            return f"⚠️ Error: {e}"
+
     if cmd == "/help":
         return ("🤖 *Available Commands:*\n\n"
                 "*Job Search:*\n"
-                "/findjobs — search LinkedIn Easy Apply jobs\n"
-                "/applyjobs — apply to approved jobs (auto-tailors resume + reaches recruiter)\n"
+                "/autoapply — find + apply to all new Easy Apply jobs automatically\n"
+                "/findjobs — search jobs (manual approval mode)\n"
+                "/applyjobs — apply to manually approved jobs\n"
                 "/mystatus — view all applications + pipeline\n"
                 "/update [id] [stage] [note] — update application stage\n"
                 "  Stages: applied phone\\_screen interview offer rejected\n\n"
                 "*Networking:*\n"
                 "/feed — scan LinkedIn feed, approve comments + connections\n\n"
+                "*Learning:*\n"
+                "/digest — fetch today's tech digest (AWS, .NET, Kafka, fintech)\n\n"
                 "*Daily:*\n"
                 "/schedule — today's calendar\n"
                 "/emails — last 2hrs email summary\n"
@@ -280,7 +561,7 @@ def handle_command(text):
 
 def run():
     print(f"[{datetime.now().strftime('%H:%M')}] Bot server started. Listening for messages...")
-    send_message("🤖 Assistant is online! Type anything to chat, or use /help to see commands.")
+    send_message("🤖 Bunty is online! Type anything to chat, or use /help to see commands.")
 
     offset = None
     while True:
@@ -310,7 +591,9 @@ def run():
                 if not text or not is_authorized(msg):
                     continue
 
-                print(f"[{datetime.now().strftime('%H:%M')}] [{thread_id}] Message: {text}")
+                chat_id = msg.get("chat", {}).get("id", "?")
+                chat_title = msg.get("chat", {}).get("title", "DM")
+                print(f"[{datetime.now().strftime('%H:%M')}] chat={chat_id} ({chat_title}) thread={thread_id} | {text}")
 
                 # Check for commands first
                 if text.startswith("/"):
@@ -319,14 +602,12 @@ def run():
                         send_message(reply, thread_id=thread_id)
                         continue
 
-                # Otherwise send to Claude — only respond in Chat topic or DM
-                from telegram_topics import TOPICS
-                if thread_id is None or thread_id == TOPICS.get("chat"):
-                    try:
-                        reply = ask_claude(text)
-                        send_message(reply, thread_id=thread_id)
-                    except Exception as e:
-                        send_message(f"⚠️ Error: {e}", thread_id=thread_id)
+                # Respond in any topic or DM
+                try:
+                    reply = ask_claude(text)
+                    send_message(reply, thread_id=thread_id)
+                except Exception as e:
+                    send_message(f"⚠️ Error: {e}", thread_id=thread_id)
 
         except KeyboardInterrupt:
             print("Bot stopped.")

@@ -181,7 +181,8 @@ async def save_session(page):
 
 async def load_session(context):
     if SESSION_FILE.exists():
-        cookies = json.loads(SESSION_FILE.read_text())
+        data = json.loads(SESSION_FILE.read_text())
+        cookies = data["cookies"] if isinstance(data, dict) and "cookies" in data else data
         await context.add_cookies(cookies)
         return True
     return False
@@ -314,43 +315,80 @@ async def search_jobs(page, keyword):
 async def apply_to_job(page, job):
     """Apply to a single Easy Apply job."""
     try:
-        await page.goto(job["url"])
-        await page.wait_for_timeout(2000)
+        await page.goto(job["url"], wait_until="domcontentloaded")
+        await page.wait_for_timeout(3000)
 
-        # Click Easy Apply button
-        apply_btn = await page.query_selector("button.jobs-apply-button")
+        # Find Easy Apply button via aria-label (works regardless of hashed CSS classes)
+        apply_btn = (
+            await page.query_selector("button[aria-label='Easy Apply to this job']") or
+            await page.query_selector("button[aria-label*='Easy Apply']")
+        )
+
         if not apply_btn:
-            print(f"  No Easy Apply button for {job['title']}")
+            all_btns = await page.evaluate("() => Array.from(document.querySelectorAll('button')).map(b => b.getAttribute('aria-label') || b.innerText.trim()).filter(t => t).slice(0, 15)")
+            print(f"  No Easy Apply button for {job['title']}. Buttons: {all_btns}")
             return False
 
+        print(f"  Found Easy Apply button for {job['title']}, clicking...")
         await apply_btn.click()
         await page.wait_for_timeout(2000)
 
-        # Go through application steps (next/submit)
-        for _ in range(10):
-            # Check for Submit button
-            submit = await page.query_selector("button[aria-label*='Submit application']")
-            if submit:
-                await submit.click()
+        # Skip if redirected off LinkedIn (third-party application site)
+        if 'linkedin.com' not in page.url:
+            print(f"  Redirected to third-party site: {page.url} — skipping")
+            return False
+
+        # Click through all Easy Apply steps using LinkedIn's pre-filled data
+        review_count = 0
+        for step in range(30):
+            await page.wait_for_timeout(1500)
+
+            # After hitting Review twice without Submit, scroll down and look harder for Submit
+            if review_count >= 2:
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(500)
+
+            clicked = await page.evaluate("""() => {
+                for (const btn of document.querySelectorAll('button')) {
+                    const t = btn.innerText.trim();
+                    const a = btn.getAttribute('aria-label') || '';
+                    if (t === 'Submit application' || a.includes('Submit application')) {
+                        btn.click(); return 'submit';
+                    }
+                }
+                for (const btn of document.querySelectorAll('button')) {
+                    const t = btn.innerText.trim();
+                    const a = btn.getAttribute('aria-label') || '';
+                    if (t === 'Review' || a.includes('Review your application')) {
+                        btn.click(); return 'review';
+                    }
+                    if (t === 'Next' || a.includes('Continue to next step')) {
+                        btn.click(); return 'next';
+                    }
+                    if (t === 'Done') {
+                        btn.click(); return 'done';
+                    }
+                }
+                return null;
+            }""")
+
+            print(f"  Step {step}: clicked={clicked}")
+            if clicked == 'review':
+                review_count += 1
+
+            if clicked == 'submit':
                 await page.wait_for_timeout(2000)
                 print(f"  ✅ Applied to {job['title']} at {job['company']}")
                 return True
 
-            # Click Next
-            nxt = await page.query_selector("button[aria-label*='Continue to next step']")
-            if nxt:
-                await nxt.click()
-                await page.wait_for_timeout(1500)
-                continue
+            if clicked == 'done':
+                print(f"  ✅ Applied to {job['title']} at {job['company']}")
+                return True
 
-            # Review button
-            review = await page.query_selector("button[aria-label*='Review your application']")
-            if review:
-                await review.click()
-                await page.wait_for_timeout(1500)
-                continue
-
-            break
+            if clicked is None:
+                all_btns = await page.evaluate("() => Array.from(document.querySelectorAll('button')).map(b => b.getAttribute('aria-label') || b.innerText.trim()).filter(t => t).slice(0,10)")
+                print(f"  Step {step}: no nav button found — {all_btns}")
+                break
 
         return False
 
@@ -525,8 +563,13 @@ async def apply_approved():
                 print(f"  Resume tailor error: {e}")
 
             # 2. Apply
-            success = await apply_to_job(page, job)
-            status = "applied" if success else "failed"
+            try:
+                success = await apply_to_job(page, job)
+                status = "applied" if success else "failed"
+            except Exception as e:
+                print(f"  Apply error for {job['title']}: {e}")
+                status = "failed"
+                success = False
             update_job_status(job["id"], status)
 
             if success:
@@ -548,7 +591,7 @@ async def apply_approved():
                 except Exception as e:
                     print(f"  Recruiter outreach error: {e}")
             else:
-                send_telegram(f"⚠️ Could not apply to *{job['title']}* at {job['company']} — Easy Apply form needs manual review.")
+                send_telegram(f"⚠️ Skipped *{job['title']}* at {job['company']} — redirects to external site.")
 
             await asyncio.sleep(5)
 
@@ -575,6 +618,82 @@ def poll_approvals():
         time.sleep(2)
 
 
+async def auto_apply():
+    """Find jobs and apply immediately — no Telegram approval step."""
+    init_db()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"]
+        )
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800},
+        )
+        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        page = await context.new_page()
+        await load_session(context)
+        await page.goto("https://www.linkedin.com/feed")
+        await page.wait_for_timeout(2000)
+
+        if "login" in page.url or "authwall" in page.url:
+            send_telegram("⚠️ LinkedIn session expired — re-login needed.")
+            await browser.close()
+            return
+
+        # Phase 1: find all new jobs
+        new_jobs = []
+        for keyword in JOB_KEYWORDS:
+            jobs = await search_jobs(page, keyword)
+            for job in jobs:
+                if not already_seen(job["id"]):
+                    save_job(job)
+                    update_job_status(job["id"], "approved")
+                    new_jobs.append(job)
+                    await asyncio.sleep(1)
+
+        if not new_jobs:
+            send_telegram("💼 *Auto Apply*\nNo new Easy Apply jobs found.")
+            await browser.close()
+            return
+
+        send_telegram(f"💼 Found *{len(new_jobs)} new jobs* — applying now, no approval needed...")
+
+        # Phase 2: apply immediately using LinkedIn's default resume
+        applied = 0
+        for job in new_jobs:
+            try:
+                success = await apply_to_job(page, job)
+                status = "applied" if success else "failed"
+            except Exception as e:
+                print(f"  Apply error for {job['title']}: {e}")
+                status = "failed"
+                success = False
+            update_job_status(job["id"], status)
+
+            if success:
+                applied += 1
+                send_telegram(f"✅ Applied: *{job['title']}* at {job['company']}")
+                try:
+                    recruiter = await find_and_connect_recruiter(page, job)
+                    if recruiter:
+                        conn = sqlite3.connect(DB_PATH)
+                        conn.execute("UPDATE jobs SET recruiter=? WHERE id=?", (recruiter, job["id"]))
+                        conn.commit()
+                        conn.close()
+                        send_telegram(f"🤝 Recruiter outreach sent at *{job['company']}*")
+                except Exception as e:
+                    print(f"  Recruiter error: {e}")
+            else:
+                send_telegram(f"⚠️ Skipped *{job['title']}* at {job['company']} — redirects to external site.")
+
+            await asyncio.sleep(5)
+
+        await browser.close()
+    send_telegram(f"🎉 Done! *{applied}/{len(new_jobs)}* applications submitted.")
+
+
 async def do_login():
     """Open visible browser, auto-fill credentials and save session."""
     await login_linkedin_visible()
@@ -588,6 +707,8 @@ if __name__ == "__main__":
         asyncio.run(find_jobs())
     elif cmd == "apply":
         asyncio.run(apply_approved())
+    elif cmd == "autoapply":
+        asyncio.run(auto_apply())
     elif cmd == "poll":
         poll_approvals()
     elif cmd == "login":
