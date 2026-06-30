@@ -1,150 +1,254 @@
 #!/usr/bin/env python3
 """
 Resume Auto-Tailor
-- Fetches job description from LinkedIn
-- Uses Claude to rewrite resume bullets to match the role
-- Returns tailored resume text to send via Telegram
+- Fetches job description from DB cache (already scraped during find_jobs)
+- Uses Claude to rewrite resume to beat ATS for that specific job
+- Generates a clean, ATS-parseable PDF and returns its path
 """
 
 import anthropic
-import requests
+import sqlite3
+import re
 from pathlib import Path
 from dotenv import dotenv_values
-from playwright.async_api import async_playwright
-import asyncio
+from fpdf import FPDF
 
 config        = dotenv_values(Path.home() / ".env")
 ANTHROPIC_KEY = config.get("ANTHROPIC_API_KEY")
 
-RESUME = """
-Akshay Mittapally | akshayreddy2022@gmail.com | +1 (913) 940 6869 | Irvine, CA
-
-EXPERIENCE
-
-Software Engineer — Luxoft USA Inc., California (Mar 2025 – Present)
-• Developed microservices for Capital Group's CRD platform using .NET Core and Apache Kafka
-• Built CI/CD pipelines with Harness, Docker, and Kubernetes (EKS) on AWS
-• Integrated Datadog and Splunk for monitoring and alerting across distributed services
-• Automated infrastructure provisioning using Terraform reducing deployment time by 40%
-
-Software Engineer — Elevance Health (Aug 2024 – Feb 2025, Contract)
-• Built HIPAA-compliant patient management system covering records, scheduling, and billing using ASP.NET Core and Angular
-• Deployed Web APIs on AWS Elastic Beanstalk integrated with RDS (SQL Server), S3, and Cognito
-• Implemented role-based access control and HIPAA-compliant authorization via AWS Cognito and .NET identity management
-• Automated deployment pipelines via AWS CodePipeline; containerized services with Docker
-
-Full Stack .NET Developer — Delta Air Lines (Feb 2024 – May 2024, Internship)
-• Built passenger reservation system handling booking, seat selection, and payment flows using React, TypeScript
-• Integrated Amadeus GDS API for real-time flight data, Stripe and PayPal for payments, AWS Cognito/OAuth2 for auth
-• Improved performance using ElastiCache (Redis); automated deployments via AWS CodePipeline and CloudFormation
-
-Software Engineer — Cognizant (Feb 2022 – Dec 2022)
-• Developed enterprise web applications using ASP.NET MVC and Web API with SQL Server
-• Collaborated in Agile/Scrum teams delivering bi-weekly sprints
-
-EDUCATION
-MS Computer Science — University of Central Missouri (2023–2024), GPA 3.5
-
-SKILLS
-Backend: ASP.NET Core, .NET, C#, RESTful APIs, Microservices
-Frontend: React, Angular, TypeScript
-Cloud: AWS (EC2, RDS, S3, EKS, Lambda, Elastic Beanstalk, Cognito, CodePipeline)
-DevOps: Docker, Kubernetes, Terraform, Harness, CI/CD
-Messaging: Apache Kafka
-Monitoring: Datadog, Splunk
-Databases: SQL Server, ElastiCache (Redis)
-Other: Python, OAuth2, HIPAA compliance, Agile/Scrum
-"""
+RESUMES_DIR = Path(__file__).parent / "resumes"
+DB_PATH     = Path(__file__).parent / "applied_jobs.db"
 
 
-async def fetch_job_description(url, session_file):
-    """Scrape job description from LinkedIn job page."""
+# ── Resume file loading ───────────────────────────────────────────────────────
+
+def load_resume(name: str) -> str:
+    path = RESUMES_DIR / f"{name}.txt"
+    if path.exists():
+        return path.read_text(encoding="utf-8").strip()
+    fallback = RESUMES_DIR / "resume_devops.txt"
+    return fallback.read_text(encoding="utf-8").strip() if fallback.exists() else ""
+
+
+def _pick_resume_name(job_title: str, jd: str) -> str:
+    text = (job_title + " " + jd).lower()
+    if any(k in text for k in ["machine learning", "ml engineer", "data scientist",
+                                 "ai engineer", "llm", "nlp", "deep learning", "mlops"]):
+        return "resume_fullstack"
+    return "resume_devops"
+
+
+# ── JD from DB (cached during find_jobs) ─────────────────────────────────────
+
+def _get_cached_jd(job_id: str) -> str:
     try:
-        import json
-        cookies = json.loads(Path(session_file).read_text()) if Path(session_file).exists() else []
-
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
-            if cookies:
-                cookie_list = cookies["cookies"] if isinstance(cookies, dict) and "cookies" in cookies else cookies
-                await context.add_cookies(cookie_list)
-            page = await context.new_page()
-            await page.goto(url, wait_until="domcontentloaded")
-            await page.wait_for_timeout(3000)
-
-            # Try to expand "Show more" for full description
-            try:
-                btn = await page.query_selector("button[aria-label*='more']")
-                if btn:
-                    await btn.click()
-                    await page.wait_for_timeout(1000)
-            except Exception:
-                pass
-
-            desc_el = (
-                await page.query_selector(".jobs-description__content") or
-                await page.query_selector(".job-details-jobs-unified-top-card__job-insight") or
-                await page.query_selector("#job-details") or
-                await page.query_selector(".description__text")
-            )
-            desc = (await desc_el.inner_text()).strip() if desc_el else ""
-            await browser.close()
-            return desc[:3000]  # cap at 3k chars for Claude
-    except Exception as e:
-        print(f"Could not fetch job description: {e}")
+        conn = sqlite3.connect(DB_PATH)
+        row  = conn.execute("SELECT description FROM jobs WHERE id=?", (job_id,)).fetchone()
+        conn.close()
+        return (row[0] or "") if row else ""
+    except Exception:
         return ""
 
 
-def tailor_resume_with_claude(job_title, company, job_description):
-    """Ask Claude to rewrite resume bullets to match the job."""
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+# ── ATS-focused Claude tailoring ─────────────────────────────────────────────
 
-    prompt = f"""You are a professional resume writer. Tailor Akshay's resume for this specific job.
+_ATS_PROMPT = """You are an expert ATS resume optimizer. Rewrite Harshith's resume to maximise its score for this specific job.
 
 JOB: {job_title} at {company}
 
 JOB DESCRIPTION:
-{job_description if job_description else "No description available — tailor based on job title."}
+{jd}
 
-AKSHAY'S CURRENT RESUME:
-{RESUME}
+HARSHITH'S BASE RESUME:
+{resume}
 
-INSTRUCTIONS:
-1. Keep the same structure and all real experience — do NOT invent anything
-2. Rewrite bullet points to use keywords from the job description
-3. Reorder skills to put the most relevant ones first
-4. Adjust the summary/profile emphasis to match what this company wants
-5. Keep it concise — max 1 page worth of content
+ATS OPTIMISATION RULES — follow every one:
+1. Mirror the EXACT job title in the summary line (e.g. "seeking a DevOps Engineer role")
+2. Copy keywords VERBATIM from the JD — if they write "containerization" don't say "containers"
+3. Every bullet must start with a strong action verb: Architected, Deployed, Automated, Implemented, Designed, Optimised, Reduced, Increased
+4. Quantify where plausible: "Deployed 5+ microservices", "Reduced pipeline runtime by 40%", "Managed 3 AWS environments"
+5. Skills section: list ONLY skills mentioned in the JD, most relevant first
+6. Use EXACT section headers: PROFESSIONAL SUMMARY, EXPERIENCE, EDUCATION, TECHNICAL SKILLS
+7. 100% factual — Harshith's real experience is from Griffith MSc projects; do NOT invent employers or dates
+8. Max 450 words total — ATS scanners prefer concise resumes
+9. Plain text only — no markdown symbols, no bullet chars, use a plain hyphen (-) for bullets
+10. Contact line: Harshith Mittapally | harshithreddy200811@gmail.com | +353899879815 | Dublin, Ireland
 
-Return ONLY the tailored resume text, no commentary."""
+Return ONLY the resume text. No intro, no commentary."""
 
-    response = client.messages.create(
+
+def tailor_with_claude(job_title: str, company: str, jd: str, resume_text: str) -> str:
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    prompt = _ATS_PROMPT.format(
+        job_title=job_title, company=company,
+        jd=jd[:2500] if jd else "Not available — tailor based on job title only.",
+        resume=resume_text,
+    )
+    resp = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=1024,
+        max_tokens=1200,
         messages=[{"role": "user", "content": prompt}]
     )
-    return response.content[0].text
+    return resp.content[0].text.strip()
 
 
-def tailor_for_job(job, session_file):
-    """Full pipeline: fetch JD → tailor → return text."""
-    print(f"Tailoring resume for {job['title']} @ {job['company']}...")
-    jd = asyncio.run(fetch_job_description(job["url"], session_file))
-    tailored = tailor_resume_with_claude(job["title"], job["company"], jd)
-    return tailored
+# ── PDF generation (ATS-clean single-column) ─────────────────────────────────
+
+class _ResumePDF(FPDF):
+    def __init__(self):
+        super().__init__()
+        self.set_margins(18, 18, 18)
+        self.set_auto_page_break(auto=True, margin=15)
+
+    def _safe(self, text: str) -> str:
+        return text.encode("latin-1", errors="replace").decode("latin-1")
+
+    def header_line(self, text: str):
+        self.set_font("Helvetica", "B", 10.5)
+        self.set_text_color(0, 0, 0)
+        self.cell(0, 6, self._safe(text), ln=True)
+        self.set_draw_color(80, 80, 80)
+        self.set_line_width(0.3)
+        self.line(self.get_x(), self.get_y(), self.get_x() + self.epw, self.get_y())
+        self.ln(1)
+
+    def body_text(self, text: str, indent: float = 0):
+        self.set_font("Helvetica", "", 9.5)
+        self.set_text_color(30, 30, 30)
+        if indent:
+            self.set_x(self.get_x() + indent)
+        self.multi_cell(self.epw - indent, 5, self._safe(text))
+
+    def bold_text(self, text: str):
+        self.set_font("Helvetica", "B", 9.5)
+        self.set_text_color(0, 0, 0)
+        self.multi_cell(self.epw, 5, self._safe(text))
 
 
-if __name__ == "__main__":
-    import sys
-    # Quick test
-    job = {
-        "title": sys.argv[1] if len(sys.argv) > 1 else "Software Developer .NET",
-        "company": sys.argv[2] if len(sys.argv) > 2 else "Test Company",
-        "url": sys.argv[3] if len(sys.argv) > 3 else ""
-    }
-    session = Path(__file__).parent / "linkedin_session.json"
-    result = tailor_for_job(job, str(session))
-    print(result)
+def _generate_pdf(resume_text: str, output_path: Path) -> Path:
+    pdf = _ResumePDF()
+    pdf.add_page()
+
+    lines = [l.rstrip() for l in resume_text.splitlines()]
+
+    # Known section headers
+    SECTIONS = {"PROFESSIONAL SUMMARY", "EXPERIENCE", "EDUCATION",
+                 "TECHNICAL SKILLS", "SKILLS", "PROJECTS", "INTERNSHIP",
+                 "PROFILE OVERVIEW", "CERTIFICATIONS"}
+
+    # First line(s) before any section = contact block
+    in_contact = True
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        # Detect contact block end
+        if in_contact and line.strip().upper() in SECTIONS:
+            in_contact = False
+
+        if in_contact:
+            stripped = line.strip()
+            if not stripped:
+                i += 1
+                continue
+            if i == 0:
+                # Name line — bigger and bold
+                pdf.set_font("Helvetica", "B", 13)
+                pdf.set_text_color(0, 0, 0)
+                pdf.cell(0, 7, pdf._safe(stripped), ln=True)
+            else:
+                pdf.set_font("Helvetica", "", 9)
+                pdf.set_text_color(60, 60, 60)
+                pdf.multi_cell(pdf.epw, 5, pdf._safe(stripped))
+            i += 1
+            continue
+
+        stripped = line.strip()
+        if not stripped:
+            pdf.ln(2)
+            i += 1
+            continue
+
+        # Section header
+        if stripped.upper() in SECTIONS:
+            pdf.ln(3)
+            pdf.header_line(stripped.upper())
+            i += 1
+            continue
+
+        # Bullet point
+        if stripped.startswith("-") or stripped.startswith("•"):
+            bullet_text = stripped.lstrip("-•").strip()
+            pdf.set_font("Helvetica", "", 9.5)
+            pdf.set_text_color(30, 30, 30)
+            x0 = pdf.get_x()
+            pdf.set_x(x0 + 4)
+            pdf.cell(4, 5, pdf._safe("–"), ln=False)
+            pdf.set_x(x0 + 9)
+            pdf.multi_cell(pdf.epw - 9, 5, pdf._safe(bullet_text))
+            i += 1
+            continue
+
+        # Experience line (role/company — dates pattern)
+        if re.search(r"(–|—|\|)", stripped) and any(
+            k in stripped.lower() for k in ["20", "present", "griffith", "cmr", "college"]
+        ):
+            pdf.bold_text(stripped)
+            i += 1
+            continue
+
+        # Regular paragraph text
+        pdf.body_text(stripped)
+        i += 1
+
+    pdf.output(str(output_path))
+    return output_path
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def tailor_for_job(job: dict, session_file: str = "") -> tuple[str, str | None]:
+    """
+    Tailor resume for a job. Returns (tailored_text, pdf_path).
+    Uses JD from DB cache (scraped during find_jobs); no browser needed.
+    """
+    job_id    = job.get("id", "")
+    job_title = job.get("title", "")
+    company   = job.get("company", "")
+
+    print(f"  [tailor] Tailoring for {job_title} @ {company}...")
+
+    # Get JD from DB cache
+    jd = _get_cached_jd(job_id)
+    if not jd:
+        print(f"  [tailor] No cached JD — using title only")
+
+    resume_name = _pick_resume_name(job_title, jd)
+    resume_text = load_resume(resume_name)
+
+    try:
+        tailored_text = tailor_with_claude(job_title, company, jd, resume_text)
+    except Exception as e:
+        print(f"  [tailor] Claude error: {e} — using base resume")
+        tailored_text = resume_text
+
+    # Generate tailored PDF
+    pdf_path = None
+    try:
+        pdf_file = RESUMES_DIR / f"tailored_{job_id}.pdf"
+        _generate_pdf(tailored_text, pdf_file)
+        pdf_path = str(pdf_file)
+        print(f"  [tailor] PDF saved: {pdf_file.name}")
+    except Exception as e:
+        print(f"  [tailor] PDF generation error: {e}")
+
+    # Store tailored text in DB
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE jobs SET tailored_resume=? WHERE id=?", (tailored_text[:4000], job_id))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+    return tailored_text, pdf_path

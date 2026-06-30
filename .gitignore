@@ -8,11 +8,17 @@ linkedin_session.json
 *.log
 bot.pid
 seen_emails.json
+*.pid
 
 # Databases (personal data)
 *.db
+
+# Resumes (personal documents — do not commit)
+resumes/
 
 # Python
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+.Python

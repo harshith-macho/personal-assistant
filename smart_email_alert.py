@@ -17,11 +17,15 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 config         = dotenv_values(Path.home() / ".env")
-GMAIL_ADDR     = config.get("GMAIL_ADDRESS")
-GMAIL_PASS     = config.get("GMAIL_APP_PASSWORD")
 TELEGRAM_TOKEN = config.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT  = config.get("TELEGRAM_CHAT_ID")
 ANTHROPIC_KEY  = config.get("ANTHROPIC_API_KEY")
+
+GMAIL_ACCOUNTS = [
+    (config.get(f"GMAIL_ADDRESS_{i}"), config.get(f"GMAIL_APP_PASSWORD_{i}"))
+    for i in range(1, 4)
+    if config.get(f"GMAIL_ADDRESS_{i}") and config.get(f"GMAIL_APP_PASSWORD_{i}")
+]
 
 SEEN_FILE = Path(__file__).parent / "seen_emails.json"
 
@@ -81,21 +85,18 @@ Body preview: {snippet[:400]}"""}]
         return {"urgent": False, "type": "other", "summary": subject}
 
 
-def check_priority_emails():
-    seen = load_seen()
-    new_seen = set()
-    alerts = []
-
+def check_account(address, app_password, seen, new_seen, alerts):
+    """Check one Gmail account for priority emails."""
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        mail.login(GMAIL_ADDR, GMAIL_PASS)
+        mail.login(address, app_password)
         mail.select("inbox")
 
         since = (datetime.now() - timedelta(hours=1)).strftime("%d-%b-%Y")
         _, data = mail.search(None, f'(SINCE {since} UNSEEN)')
 
         ids = data[0].split() if data[0] else []
-        for eid in ids[-30:]:  # check up to 30 recent
+        for eid in ids[-30:]:
             try:
                 _, msg_data = mail.fetch(eid, "(RFC822)")
                 msg = email.message_from_bytes(msg_data[0][1])
@@ -103,12 +104,10 @@ def check_priority_emails():
                 subject = msg.get("Subject", "(no subject)")
                 sender  = msg.get("From", "")
 
-                # Skip already seen
                 if msg_id in seen:
                     continue
                 new_seen.add(msg_id)
 
-                # Get body
                 body = ""
                 if msg.is_multipart():
                     for part in msg.walk():
@@ -124,7 +123,6 @@ def check_priority_emails():
                     except Exception:
                         pass
 
-                # Check timestamp — only last 1 hour
                 try:
                     date_str = msg.get("Date", "")
                     msg_dt = parsedate_to_datetime(date_str)
@@ -138,15 +136,23 @@ def check_priority_emails():
 
                 if is_priority(subject, body):
                     result = classify_with_claude(subject, sender, body)
-                    alerts.append((result, subject, sender))
+                    alerts.append((result, subject, sender, address))
 
             except Exception:
                 continue
 
         mail.logout()
     except Exception as e:
-        print(f"IMAP error: {e}")
-        return
+        print(f"IMAP error ({address}): {e}")
+
+
+def check_priority_emails():
+    seen = load_seen()
+    new_seen = set()
+    alerts = []
+
+    for address, app_password in GMAIL_ACCOUNTS:
+        check_account(address, app_password, seen, new_seen, alerts)
 
     seen.update(new_seen)
     save_seen(seen)
@@ -160,10 +166,11 @@ def check_priority_emails():
         "other":               "📧",
     }
 
-    for result, subject, sender in alerts:
+    for result, subject, sender, account in alerts:
         emoji = TYPE_EMOJI.get(result.get("type", "other"), "📧")
         urgency = "🚨 *URGENT* " if result.get("urgent") else ""
         msg = (f"{urgency}{emoji} *{result.get('type', 'Email').replace('_', ' ').title()}*\n\n"
+               f"*To:* {account}\n"
                f"*From:* {sender[:50]}\n"
                f"*Subject:* {subject[:80]}\n\n"
                f"_{result.get('summary', '')}_")

@@ -17,20 +17,23 @@ from calendar_bot import get_calendar_summary
 # Load credentials from ~/.env
 config = dotenv_values(Path.home() / ".env")
 
-GMAIL_ADDRESS   = config.get("GMAIL_ADDRESS", "akshayreddy2022@gmail.com")
-GMAIL_APP_PASS  = config.get("GMAIL_APP_PASSWORD")
 ANTHROPIC_KEY   = config.get("ANTHROPIC_API_KEY")
 TELEGRAM_TOKEN  = config.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT   = config.get("TELEGRAM_CHAT_ID")
 
+GMAIL_ACCOUNTS = [
+    (config.get(f"GMAIL_ADDRESS_{i}"), config.get(f"GMAIL_APP_PASSWORD_{i}"))
+    for i in range(1, 4)
+    if config.get(f"GMAIL_ADDRESS_{i}") and config.get(f"GMAIL_APP_PASSWORD_{i}")
+]
 
-def fetch_recent_emails(hours=2):
-    """Fetch emails from Gmail received in the last N hours."""
+
+def fetch_recent_emails_from_account(address, app_password, hours=2):
+    """Fetch emails from a single Gmail account received in the last N hours."""
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
-    mail.login(GMAIL_ADDRESS, GMAIL_APP_PASS)
+    mail.login(address, app_password)
     mail.select("inbox")
 
-    # IMAP SINCE only filters by date, not time — fetch since yesterday to be safe
     since_date = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%d-%b-%Y")
     _, msg_ids = mail.search(None, f'(SINCE "{since_date}")')
 
@@ -41,7 +44,6 @@ def fetch_recent_emails(hours=2):
         _, data = mail.fetch(mid, "(RFC822)")
         msg = email.message_from_bytes(data[0][1])
 
-        # Parse and check email date
         date_str = msg.get("Date", "")
         try:
             from email.utils import parsedate_to_datetime
@@ -49,17 +51,15 @@ def fetch_recent_emails(hours=2):
             if email_dt.tzinfo is None:
                 email_dt = email_dt.replace(tzinfo=timezone.utc)
             if email_dt < cutoff:
-                continue  # skip emails older than N hours
+                continue
         except Exception:
             pass
 
-        # Decode subject
         subject_raw, enc = decode_header(msg["Subject"] or "No Subject")[0]
         subject = subject_raw.decode(enc or "utf-8") if isinstance(subject_raw, bytes) else (subject_raw or "No Subject")
 
         sender = msg.get("From", "Unknown")
 
-        # Extract plain text body
         body = ""
         if msg.is_multipart():
             for part in msg.walk():
@@ -70,6 +70,7 @@ def fetch_recent_emails(hours=2):
             body = msg.get_payload(decode=True).decode(errors="ignore")
 
         emails.append({
+            "account": address,
             "subject": subject,
             "from": sender,
             "date": date_str,
@@ -80,6 +81,19 @@ def fetch_recent_emails(hours=2):
     return emails
 
 
+def fetch_recent_emails(hours=2):
+    """Fetch emails from all configured Gmail accounts."""
+    all_emails = []
+    for address, app_password in GMAIL_ACCOUNTS:
+        try:
+            fetched = fetch_recent_emails_from_account(address, app_password, hours)
+            all_emails.extend(fetched)
+            print(f"  {address}: {len(fetched)} emails")
+        except Exception as e:
+            print(f"  {address}: failed — {e}")
+    return all_emails
+
+
 def summarize_with_claude(emails):
     """Send emails to Claude for summarization."""
     if not emails:
@@ -87,7 +101,7 @@ def summarize_with_claude(emails):
 
     email_text = ""
     for i, e in enumerate(emails, 1):
-        email_text += f"\n--- Email {i} ---\nFrom: {e['from']}\nSubject: {e['subject']}\nDate: {e['date']}\n{e['body']}\n"
+        email_text += f"\n--- Email {i} ---\nAccount: {e.get('account', '')}\nFrom: {e['from']}\nSubject: {e['subject']}\nDate: {e['date']}\n{e['body']}\n"
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     message = client.messages.create(
@@ -107,7 +121,11 @@ Keep the total summary under 300 words.
 
 def send_telegram(message):
     from telegram_topics import send_emails
-    return send_emails(message)
+    chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
+    ok = True
+    for chunk in chunks:
+        ok = send_emails(chunk, parse_mode=None) and ok
+    return ok
 
 
 def run():
