@@ -11,18 +11,18 @@
         <!-- Replace with your Python path: run `which python3` to find it -->
         <string>/Library/Frameworks/Python.framework/Versions/3.11/bin/python3</string>
         <!-- Replace YOUR_USERNAME with your macOS username -->
-        <string>/Users/YOUR_USERNAME/email_assistant/bot_server.py</string>
+        <string>/Users/YOUR_USERNAME/MyAssist/personal-assistant/bot_server.py</string>
     </array>
     <key>WorkingDirectory</key>
     <!-- Replace YOUR_USERNAME with your macOS username -->
-    <string>/Users/YOUR_USERNAME/email_assistant</string>
+    <string>/Users/YOUR_USERNAME/MyAssist/personal-assistant</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/YOUR_USERNAME/email_assistant/assistant.log</string>
+    <string>/Users/YOUR_USERNAME/MyAssist/personal-assistant/assistant.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/YOUR_USERNAME/email_assistant/assistant.log</string>
+    <string>/Users/YOUR_USERNAME/MyAssist/personal-assistant/assistant.log</string>
 </dict>
 </plist>

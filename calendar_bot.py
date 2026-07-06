@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-LOCAL_TZ = ZoneInfo("America/Los_Angeles")
+LOCAL_TZ = ZoneInfo("Europe/Dublin")
 
 SCOPES  = ["https://www.googleapis.com/auth/calendar"]
 BASE    = Path(__file__).parent

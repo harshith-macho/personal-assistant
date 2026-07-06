@@ -26,19 +26,27 @@ PYTHON     = sys.executable
 STOCKS_DIR = Path.home() / "Akshay" / "stockspredictor"
 
 # Prevent duplicate instances
+import platform as _platform
 PIDFILE = Path(os.environ.get("TEMP", "/tmp")) / "akshay_bot.pid"
 if PIDFILE.exists():
     old_pid = int(PIDFILE.read_text().strip())
     _bot_alive = False
     try:
         os.kill(old_pid, 0)
-        # On Windows, PID reuse is common — confirm it's actually Python
+        # PID exists — confirm it's actually a Python process (PID reuse guard)
         import subprocess as _sp
-        _out = _sp.run(
-            ["tasklist", "/FI", f"PID eq {old_pid}", "/NH", "/FO", "CSV"],
-            capture_output=True, text=True
-        ).stdout.lower()
-        _bot_alive = "python" in _out
+        if _platform.system() == "Windows":
+            _out = _sp.run(
+                ["tasklist", "/FI", f"PID eq {old_pid}", "/NH", "/FO", "CSV"],
+                capture_output=True, text=True
+            ).stdout.lower()
+            _bot_alive = "python" in _out
+        else:
+            _out = _sp.run(
+                ["ps", "-p", str(old_pid), "-o", "comm="],
+                capture_output=True, text=True
+            ).stdout.lower()
+            _bot_alive = "python" in _out
     except OSError:
         pass  # Process gone
     if _bot_alive:
@@ -264,8 +272,8 @@ def execute_tool(name, params):
             add_meet = params.get("add_meet", bool(attendees))
             event = {
                 "summary": params["title"],
-                "start": {"dateTime": f"{date}T{params['start_time']}:00", "timeZone": "America/Los_Angeles"},
-                "end":   {"dateTime": f"{date}T{params['end_time']}:00",   "timeZone": "America/Los_Angeles"},
+                "start": {"dateTime": f"{date}T{params['start_time']}:00", "timeZone": "Europe/Dublin"},
+                "end":   {"dateTime": f"{date}T{params['end_time']}:00",   "timeZone": "Europe/Dublin"},
             }
             if params.get("location"):
                 event["location"] = params["location"]
