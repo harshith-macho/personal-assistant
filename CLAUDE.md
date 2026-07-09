@@ -133,6 +133,7 @@ Free-form text in any topic or DM goes to `ask_claude()`.
 | `linkedin_alerts.py` | Tech news + LinkedIn Learning scanner; `run_hourly()` + `run_linkedin_courses()` |
 | `resume_updater.py` | Analyzes job descriptions vs resume; `run_resume_update()` + `handle_resume_callback()` |
 | `form_filler.py` | Caches form field answers; `_save_cached_answer()` called on late/timed-out Q&A replies |
+| `resume_manager.py` | Standalone script (not wired into bot_server.py): receives a resume PDF, saves to role slots (`resume_cloud`, `resume_ml`, `resume_swe`, `resume_devops` under `resumes/`), and uploads to LinkedIn as default resume |
 | `job_tracker.py` | Schema defined in `init_db()`; two tables: `jobs` and `feed_posts` |
 | `calendar_bot.py` | Google Calendar API; timezone defaults to `America/Los_Angeles` |
 
@@ -165,3 +166,7 @@ rm -f "$TEMP/akshay_bot.pid"
 **Google Calendar errors** — `token.json` expired; re-run `python calendar_auth.py` after deleting the old token.
 
 **LinkedIn login fails** — delete `linkedin_session.json` and run `python linkedin_auth.py` to re-authenticate.
+
+**Gmail connection refused** — re-enable 2-Step Verification, generate a new App Password at myaccount.google.com → Security → App Passwords, update `GMAIL_APP_PASSWORD` in `~/.env`.
+
+**Bot not receiving group messages** — disable bot privacy mode: message @BotFather → `/setprivacy` → select bot → Disable. Also confirm the bot is a group member.
