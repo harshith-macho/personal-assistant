@@ -12,6 +12,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from dotenv import dotenv_values
 
+from form_filler import PROFILE  # single source of truth for identity
+
 config = dotenv_values(Path.home() / ".env")
 ANTHROPIC_KEY = config.get("ANTHROPIC_API_KEY")
 
@@ -106,7 +108,7 @@ def pick_and_summarize(articles):
         max_tokens=1200,
         messages=[{
             "role": "user",
-            "content": f"""You are a tech digest curator for Akshay Mittapally, a senior .NET/cloud engineer working with AWS, Kafka, Kubernetes, Terraform, and fintech systems.
+            "content": f"""You are a tech digest curator for {PROFILE['full_name']}, a .NET/cloud engineer working with AWS, Kafka, Kubernetes, Terraform, and fintech systems.
 
 From the articles below, pick the 5-7 MOST relevant and interesting ones for his profile. Skip generic beginner content, job postings, or off-topic articles.
 

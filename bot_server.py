@@ -163,7 +163,7 @@ def is_authorized(msg):
 TOOLS = [
     {
         "name": "create_calendar_event",
-        "description": "Create a Google Calendar event for Akshay. If attendee emails are provided, send them a Google Meet invite. Always add a Google Meet link when scheduling a meeting with other people.",
+        "description": "Create a Google Calendar event for Harshith. If attendee emails are provided, send them a Google Meet invite. Always add a Google Meet link when scheduling a meeting with other people.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -180,7 +180,7 @@ TOOLS = [
     },
     {
         "name": "list_calendar_events",
-        "description": "List Akshay's upcoming calendar events.",
+        "description": "List Harshith's upcoming calendar events.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -202,7 +202,7 @@ TOOLS = [
     },
     {
         "name": "get_job_applications",
-        "description": "Get Akshay's job application pipeline from the database.",
+        "description": "Get Harshith's job application pipeline from the database.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -212,7 +212,7 @@ TOOLS = [
     },
     {
         "name": "fetch_emails",
-        "description": "Fetch and summarize Akshay's recent Gmail emails.",
+        "description": "Fetch and summarize Harshith's recent Gmail emails.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -222,12 +222,12 @@ TOOLS = [
     },
     {
         "name": "check_stocks",
-        "description": "Trigger a stock drop check for Akshay's watchlist.",
+        "description": "Trigger a stock drop check for Harshith's watchlist.",
         "input_schema": {"type": "object", "properties": {}}
     },
     {
         "name": "add_stock",
-        "description": "Add a stock ticker to Akshay's watchlist.",
+        "description": "Add a stock ticker to Harshith's watchlist.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -238,7 +238,7 @@ TOOLS = [
     },
     {
         "name": "remove_stock",
-        "description": "Remove a stock ticker from Akshay's watchlist.",
+        "description": "Remove a stock ticker from Harshith's watchlist.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -249,12 +249,12 @@ TOOLS = [
     },
     {
         "name": "list_stocks",
-        "description": "List all stocks currently in Akshay's watchlist.",
+        "description": "List all stocks currently in Harshith's watchlist.",
         "input_schema": {"type": "object", "properties": {}}
     },
     {
         "name": "search_jobs",
-        "description": "Search LinkedIn for new Easy Apply jobs matching Akshay's profile.",
+        "description": "Search LinkedIn for new Easy Apply jobs matching Harshith's profile.",
         "input_schema": {"type": "object", "properties": {}}
     }
 ]
@@ -592,6 +592,13 @@ def handle_command(text):
         except Exception as e:
             return f"⚠️ Error: {e}"
 
+    if cmd == "/analytics":
+        try:
+            from linkedin_analytics import get_analytics_report
+            return get_analytics_report()
+        except Exception as e:
+            return f"⚠️ Error: {e}"
+
     if cmd == "/help":
         return ("🤖 *Available Commands:*\n\n"
                 "*Job Search:*\n"
@@ -599,6 +606,7 @@ def handle_command(text):
                 "/findjobs — search jobs (manual approval mode)\n"
                 "/applyjobs — apply to manually approved jobs\n"
                 "/mystatus — view all applications + pipeline\n"
+                "/analytics — funnel, match quality, networking & feed stats\n"
                 "/update [id] [stage] [note] — update application stage\n"
                 "  Stages: applied phone\\_screen interview offer rejected\n\n"
                 "*Networking:*\n"

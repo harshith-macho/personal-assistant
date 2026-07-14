@@ -9,13 +9,15 @@ import anthropic
 from pathlib import Path
 from dotenv import dotenv_values
 
+from form_filler import PROFILE  # single source of truth for identity
+
 config = dotenv_values(Path.home() / ".env")
 
 ANTHROPIC_KEY  = config.get("ANTHROPIC_API_KEY")
 TELEGRAM_TOKEN = config.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT  = config.get("TELEGRAM_CHAT_ID")
 
-PERSON_URN     = "urn:li:person:1W-w0LYy9S"
+PERSON_URN     = PROFILE["linkedin_person_urn"]
 
 
 def get_token():
@@ -59,7 +61,7 @@ def generate_post_with_claude(topic):
         max_tokens=512,
         messages=[{
             "role": "user",
-            "content": f"""Write a professional LinkedIn post for Akshay M, a software developer
+            "content": f"""Write a professional LinkedIn post for {PROFILE['full_name']}, a software developer
 specializing in AWS, DevOps, and Python. The post should be about: {topic}
 
 Guidelines:

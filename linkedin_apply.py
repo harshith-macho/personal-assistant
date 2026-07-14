@@ -6,6 +6,8 @@ LinkedIn Easy Apply Bot
 - Applies to approved jobs automatically
 """
 
+from __future__ import annotations  # allow PEP-604 (str | None) annotations on Python 3.9
+
 import asyncio
 import io
 import json
@@ -708,15 +710,15 @@ async def try_ats_apply(context, external_url: str, job: dict) -> bool:
 
         # ── Greenhouse: seed known fields by ID before generic filler runs ──
         if is_greenhouse:
-            await _fill_field(page, "input#first_name", "Harshith")
-            await _fill_field(page, "input#last_name",  "Mittapally")
-            await _fill_field(page, "input#email",      "harshithreddy200811@gmail.com")
+            await _fill_field(page, "input#first_name", PROFILE.get("first_name", ""))
+            await _fill_field(page, "input#last_name",  PROFILE.get("last_name", ""))
+            await _fill_field(page, "input#email",      PROFILE.get("email", ""))
             await _fill_field(page, "input#phone",      PROFILE.get("phone", ""))
 
         # ── Lever: seed known name/email/phone fields ──
         if is_lever:
-            await _fill_field(page, "input[name='name']",  "Harshith Mittapally")
-            await _fill_field(page, "input[name='email']", "harshithreddy200811@gmail.com")
+            await _fill_field(page, "input[name='name']",  PROFILE.get("full_name", ""))
+            await _fill_field(page, "input[name='email']", PROFILE.get("email", ""))
             await _fill_field(page, "input[name='phone']", PROFILE.get("phone", ""))
 
         resume_uploaded = False
@@ -1144,6 +1146,7 @@ async def apply_to_job(page, job, resume_path=None, extra_answers=None):
 
 def _generate_recruiter_note(first_name: str, job_title: str, company: str) -> str:
     """Use Claude to write a short, genuine LinkedIn connection note. Max 300 chars."""
+    from form_filler import PROFILE  # single source of truth for identity
     try:
         client = _anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         msg = client.messages.create(
@@ -1153,8 +1156,7 @@ def _generate_recruiter_note(first_name: str, job_title: str, company: str) -> s
                 "role": "user",
                 "content": (
                     f"Write a short LinkedIn connection note (under 280 characters, no hashtags) "
-                    f"from Harshith, a software developer in Dublin with 2 years of experience in "
-                    f".NET Core, Python, AWS, Docker, and DevOps. He just applied for the "
+                    f"from {PROFILE['first_name']}, a {PROFILE['headline']}. He just applied for the "
                     f"'{job_title}' role at {company}. Address it to {first_name}. "
                     f"Sound genuine and brief — no buzzwords, no flattery. Just a human note."
                 ),
@@ -1166,7 +1168,7 @@ def _generate_recruiter_note(first_name: str, job_title: str, company: str) -> s
         print(f"  Note generation error: {e}")
         return (
             f"Hi {first_name}, I just applied for the {job_title} role at {company}. "
-            f"I'm a software developer based in Dublin with experience in AWS, .NET, and DevOps. "
+            f"I'm a {PROFILE['headline']}. "
             f"Would love to connect!"
         )[:280]
 
@@ -1257,7 +1259,14 @@ Reply ONLY with a JSON array of integers (one score per job, same order). Exampl
         return {jobs[i]["id"]: scores[i] for i in range(min(len(jobs), len(scores)))}
     except Exception as e:
         print(f"Batch scoring error: {e}")
-        return {j["id"]: AUTO_APPLY_SCORE_THRESHOLD for j in jobs}  # fallback: pass all
+        # Fail-closed: skip this batch rather than blind-applying to everything.
+        try:
+            send_telegram(
+                f"⚠️ *Job scoring failed* — skipping this batch to avoid applying blindly.\n`{e}`"
+            )
+        except Exception:
+            pass
+        return {j["id"]: 0 for j in jobs}
 
 
 async def scrape_jd_from_page(page, job_url: str) -> str:
@@ -1347,7 +1356,7 @@ Reply with a single integer only."""
         return int(resp.content[0].text.strip())
     except Exception as e:
         print(f"JD scoring error: {e}")
-        return 7  # pass if scoring fails
+        return 0  # fail-closed: skip if scoring fails rather than apply blindly
 
 
 def _save_relevance_score(job_id: str, score: int):
@@ -1453,7 +1462,7 @@ async def find_jobs():
 
         # Pass 3: scrape JD + final score for each title-passing job
         for job in passed_title:
-            title_score = title_scores.get(job["id"], AUTO_APPLY_SCORE_THRESHOLD)
+            title_score = title_scores.get(job["id"], 0)  # fail-closed: skip if score missing
             save_job(job)
 
             jd = await scrape_jd_from_page(page, job["url"])
@@ -1635,7 +1644,7 @@ async def auto_apply():
         title_scores = score_jobs_batch(candidate_list)
         new_jobs = []
         for job in candidate_list:
-            score = title_scores.get(job["id"], AUTO_APPLY_SCORE_THRESHOLD)
+            score = title_scores.get(job["id"], 0)  # fail-closed: skip if score missing
             save_job(job)
             _save_relevance_score(job["id"], score)
             if score < AUTO_APPLY_SCORE_THRESHOLD:
@@ -1658,7 +1667,7 @@ async def auto_apply():
             send_telegram(f"💼 *Auto Apply*\nAll candidates scored below {AUTO_APPLY_SCORE_THRESHOLD}/10 — nothing applied.")
             return
 
-        send_telegram(f"🚀 *{len(new_jobs)} relevant jobs* (score >= 7) — applying now...")
+        send_telegram(f"🚀 *{len(new_jobs)} relevant jobs* (score >= {AUTO_APPLY_SCORE_THRESHOLD}) — applying now...")
 
         # Phase 2: tailor + apply
         applied = 0

@@ -15,6 +15,8 @@ import re
 from pathlib import Path
 from dotenv import dotenv_values
 
+from form_filler import PROFILE  # single source of truth for identity
+
 config = dotenv_values(Path.home() / ".env")
 
 GMAIL_ADDRESS  = config.get("GMAIL_ADDRESS")
@@ -95,7 +97,7 @@ def summarize_jobs(jobs):
         max_tokens=1024,
         messages=[{
             "role": "user",
-            "content": f"""You are a job search assistant for Akshay, a software developer.
+            "content": f"""You are a job search assistant for {PROFILE['first_name']}, a software developer.
 Extract and summarize the job opportunities from these LinkedIn alert emails.
 For each job mention: Job title, Company, Location, Salary (if mentioned), and a one-line summary.
 Group similar roles together. Highlight any remote or high-paying roles.

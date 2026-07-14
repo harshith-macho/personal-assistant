@@ -19,6 +19,8 @@ from dotenv import dotenv_values
 from playwright.async_api import async_playwright
 import anthropic
 
+from form_filler import PROFILE  # single source of truth for identity
+
 config = dotenv_values(Path.home() / ".env")
 
 ANTHROPIC_KEY = config.get("ANTHROPIC_API_KEY")
@@ -184,7 +186,7 @@ def generate_comment(post):
         messages=[{
             "role": "user",
             "content": f"""Write a short, genuine LinkedIn comment (2-3 sentences) for this post.
-The commenter is Akshay, a software engineer with expertise in .NET Core, AWS, Kafka, and Kubernetes.
+The commenter is {PROFILE['first_name']}, a software engineer with expertise in {PROFILE['skills_short']}.
 Be specific to the post content. Add real value or a relevant insight. Sound human.
 Do NOT start with "Great post!" or "Excellent!" — be direct and thoughtful.
 

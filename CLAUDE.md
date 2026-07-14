@@ -62,7 +62,7 @@ All outbound sends go through here. Reads `TELEGRAM_GROUP_ID` + `TELEGRAM_TOPIC_
 
 ### LinkedIn automation — `linkedin_apply.py` + `linkedin_auth.py`
 
-Playwright-driven. `linkedin_auth.py` performs a browser login and saves `linkedin_session.json`; subsequent calls restore that session. Modes: `find` (search → send to Telegram for approval), `apply` (apply to approved jobs), `autoapply` (find + apply in one pass), `login` (re-authenticate). Job search keywords and target profile are hard-coded as `JOB_KEYWORDS` and `MY_INTERESTS` constants at the top of `linkedin_apply.py`. `AUTO_APPLY_SCORE_THRESHOLD` (default 7) controls how selective auto-apply is.
+Playwright-driven. `linkedin_auth.py` performs a browser login and saves `linkedin_session.json`; subsequent calls restore that session. Modes: `find` (search → send to Telegram for approval), `apply` (apply to approved jobs), `autoapply` (find + apply in one pass), `login` (re-authenticate). Job search keywords and target profile are hard-coded as `JOB_KEYWORDS` and `MY_INTERESTS` constants at the top of `linkedin_apply.py`. `AUTO_APPLY_SCORE_THRESHOLD` (default 6) controls how selective auto-apply is. Jobs scoring below it are skipped; on a scoring failure the bot fails **closed** (skips the batch) rather than applying blindly. Identity (name/email/persona) is centralized in `form_filler.py`'s `PROFILE` dict — edit it (or the `APPLICANT_*` keys in `~/.env`) rather than hardcoding names in individual modules.
 
 **Form Q&A IPC:** When a LinkedIn form has an unknown field, `linkedin_apply.py` writes `~/.apply_qa.json` with `status: "pending"` and the field label, then polls for `status: "answered"`. `bot_server.py` intercepts the next non-command message and writes the answer back. If the subprocess times out, the answer is cached via `form_filler._save_cached_answer()` for retry.
 
@@ -105,6 +105,7 @@ The bot's `/mystatus` and `/update` commands call `format_status_report()` and `
 | `/findjobs` | Search jobs and send each to Jobs topic for manual approval |
 | `/applyjobs` | Apply only to jobs manually approved via `/findjobs` |
 | `/mystatus` | Show full job application pipeline |
+| `/analytics` | Funnel, match-quality, networking & feed engagement stats |
 | `/update <id> <stage> [note]` | Update an application stage |
 | `/feed` | Scan LinkedIn feed, send top posts for comment/connection approval |
 | `/network` | Send LinkedIn connection requests to HRs, recruiters & peers in Ireland |

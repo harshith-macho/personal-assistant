@@ -5,6 +5,8 @@ Runs on each step of the application modal and fills any empty required fields.
 Unknown required fields are asked to the user one-by-one via Telegram.
 """
 
+from __future__ import annotations  # allow PEP-604 (str | None) annotations on Python 3.9
+
 import asyncio
 import json
 import sys
@@ -21,6 +23,18 @@ config = dotenv_values(Path.home() / ".env")
 # ── Applicant profile — edit these or set in ~/.env ──────────────────────────
 
 PROFILE = {
+    # ── Identity: single source of truth for who the bot acts as ──
+    # Used across linkedin_apply, linkedin_post, linkedin_network, linkedin_feed,
+    # linkedin_jobs and tech_digest. Override any of these via ~/.env.
+    "first_name":          config.get("APPLICANT_FIRST_NAME", "Harshith"),
+    "last_name":           config.get("APPLICANT_LAST_NAME",  "Mittapally"),
+    "full_name":           config.get("APPLICANT_FULL_NAME",  "Harshith Mittapally"),
+    "email":               config.get("APPLICANT_EMAIL",      "harshithreddy200811@gmail.com"),
+    "headline":            config.get("APPLICANT_HEADLINE",
+                                      "software developer in Dublin with 2 years of experience "
+                                      "in .NET Core, Python, AWS, Docker, and DevOps"),
+    "skills_short":        config.get("APPLICANT_SKILLS",     ".NET Core, AWS, Kafka, and Kubernetes"),
+    "linkedin_person_urn": config.get("LINKEDIN_PERSON_URN",  "urn:li:person:1W-w0LYy9S"),
     "phone":               config.get("PHONE_NUMBER",        "+353899879815"),
     "city":                config.get("APPLICANT_CITY",      "Dublin"),
     "country":             config.get("APPLICANT_COUNTRY",   "Ireland"),
