@@ -29,6 +29,11 @@ DB_PATH = Path(__file__).parent / "applied_jobs.db"
 # Stages that mean a human on the other side responded / advanced the application.
 ADVANCED_STAGES = ("phone_screen", "interview", "offer")
 
+# Statuses that mean an application was actually submitted (and possibly advanced).
+# NOTE: do NOT use `applied_at IS NOT NULL` as a proxy — update_job_status() stamps
+# applied_at on skipped/approved/failed jobs too, so it over-counts wildly.
+APPLIED_STATUSES = ("applied", "phone_screen", "interview", "offer", "rejected", "withdrawn")
+
 
 def _connect():
     # read-only; never create the DB just to report on it
@@ -55,8 +60,9 @@ def _applications_section(conn):
         return ["*💼 Applications:* no data yet"]
 
     total   = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+    ap_ph   = ",".join("?" * len(APPLIED_STATUSES))
     applied = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE applied_at IS NOT NULL"
+        f"SELECT COUNT(*) FROM jobs WHERE status IN ({ap_ph})", APPLIED_STATUSES
     ).fetchone()[0]
     skipped = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE status='skipped'"
@@ -64,8 +70,11 @@ def _applications_section(conn):
     failed = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE status='failed'"
     ).fetchone()[0]
+    queued = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE status='approved'"
+    ).fetchone()[0]
     pending = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE status IN ('pending','approved')"
+        "SELECT COUNT(*) FROM jobs WHERE status='pending'"
     ).fetchone()[0]
     needs = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE status IN ('needs_answer','needs_manual')"
@@ -86,6 +95,7 @@ def _applications_section(conn):
         "*💼 Applications Funnel*",
         f"• Seen: *{total}*  |  Applied: *{applied}* ({_pct(applied, total)})",
         f"• Skipped (low score): {skipped}  |  Failed: {failed}",
+        f"• Approved (queued, not yet applied): {queued}",
         f"• Awaiting approval: {pending}  |  Needs answer: {needs}",
         f"• Responses (screen+): *{advanced}* ({_pct(advanced, applied)} of applied)",
         f"• Offers: {offers}  |  Rejected: {rejected}",
@@ -96,24 +106,29 @@ def _applications_section(conn):
 def _scoring_section(conn):
     if not _table_exists(conn, "jobs"):
         return []
+    # Match quality of jobs the bot chose to pursue (applied or queued for apply),
+    # i.e. the ones that cleared the score threshold — not skipped junk.
+    acted = APPLIED_STATUSES + ("approved",)
+    ph = ",".join("?" * len(acted))
+    where = f"relevance_score IS NOT NULL AND status IN ({ph})"
     row = conn.execute(
-        "SELECT AVG(relevance_score), MIN(relevance_score), MAX(relevance_score) "
-        "FROM jobs WHERE relevance_score IS NOT NULL AND applied_at IS NOT NULL"
+        f"SELECT AVG(relevance_score), MIN(relevance_score), MAX(relevance_score) "
+        f"FROM jobs WHERE {where}", acted
     ).fetchone()
     avg, lo, hi = row if row else (None, None, None)
     if avg is None:
         return []
     buckets = conn.execute(
-        """SELECT
+        f"""SELECT
                SUM(CASE WHEN relevance_score >= 8 THEN 1 ELSE 0 END),
                SUM(CASE WHEN relevance_score BETWEEN 6 AND 7 THEN 1 ELSE 0 END),
                SUM(CASE WHEN relevance_score <= 5 THEN 1 ELSE 0 END)
-           FROM jobs WHERE relevance_score IS NOT NULL AND applied_at IS NOT NULL"""
+           FROM jobs WHERE {where}""", acted
     ).fetchone()
     strong, mid, low = (b or 0 for b in buckets)
     return [
         "",
-        "*🎯 Match Quality (applied jobs)*",
+        "*🎯 Match Quality (applied + queued)*",
         f"• Avg score: *{avg:.1f}/10*  (range {lo}–{hi})",
         f"• Strong 8-10: {strong}  |  Mid 6-7: {mid}  |  Low ≤5: {low}",
     ]
@@ -156,13 +171,15 @@ def _feed_section(conn):
 def _top_companies_section(conn):
     if not _table_exists(conn, "jobs"):
         return []
+    acted = APPLIED_STATUSES + ("approved",)
+    ph = ",".join("?" * len(acted))
     rows = conn.execute(
-        "SELECT company, COUNT(*) c FROM jobs WHERE applied_at IS NOT NULL "
-        "GROUP BY company ORDER BY c DESC LIMIT 5"
+        f"SELECT company, COUNT(*) c FROM jobs WHERE status IN ({ph}) "
+        f"GROUP BY company ORDER BY c DESC LIMIT 5", acted
     ).fetchall()
     if not rows:
         return []
-    lines = ["", "*🏢 Top companies applied to*"]
+    lines = ["", "*🏢 Top companies (applied + queued)*"]
     for company, c in rows:
         lines.append(f"• {company or 'Unknown'} — {c}")
     return lines

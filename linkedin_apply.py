@@ -221,9 +221,11 @@ def update_job_status(job_id, status, category=None):
             (status, "applied", datetime.now().isoformat(), category, job_id)
         )
     else:
+        # Do NOT stamp applied_at for non-applied statuses (skipped/failed/approved/
+        # needs_manual) — that pollutes "applied" metrics and reporting.
         conn.execute(
-            "UPDATE jobs SET status=?, applied_at=?, category=? WHERE id=?",
-            (status, datetime.now().isoformat(), category, job_id)
+            "UPDATE jobs SET status=?, category=? WHERE id=?",
+            (status, category, job_id)
         )
     conn.commit()
     conn.close()
