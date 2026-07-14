@@ -58,6 +58,13 @@ AUTO_APPLY_SCORE_THRESHOLD = 6  # jobs scoring below this are skipped entirely
 # manual-apply Telegram button. Set EASY_APPLY_ONLY=yes in ~/.env to restrict.
 EASY_APPLY_ONLY = config.get("EASY_APPLY_ONLY", "no").strip().lower() == "yes"
 
+# When True (default), automated runs (find/apply/autoapply) launch Chromium in
+# headless/background mode — no browser window pops up over your desktop.
+# The interactive login (login_linkedin_visible) always opens a visible window
+# so you can solve any LinkedIn challenge/captcha. Set HEADLESS=no in ~/.env to
+# watch the automation run in a visible browser.
+RUN_HEADLESS = config.get("HEADLESS", "yes").strip().lower() != "no"
+
 # Job search keywords (drive the LinkedIn search queries)
 JOB_KEYWORDS = [
     "Software Engineer Ireland",
@@ -1404,7 +1411,7 @@ _USER_AGENT = (
 async def _get_authenticated_browser(p):
     """Return (browser, context, page) with a valid LinkedIn session, auto-relogin if expired."""
     async def _make_browser():
-        b = await p.chromium.launch(headless=False, args=_HEADLESS_ARGS)
+        b = await p.chromium.launch(headless=RUN_HEADLESS, args=_HEADLESS_ARGS)
         c = await b.new_context(user_agent=_USER_AGENT, viewport={"width": 1280, "height": 800})
         await c.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         pg = await c.new_page()
