@@ -52,6 +52,12 @@ MY_INTERESTS = {
 }
 AUTO_APPLY_SCORE_THRESHOLD = 6  # jobs scoring below this are skipped entirely
 
+# When True, search is restricted to LinkedIn "Easy Apply" jobs only.
+# When False (default), search also returns off-site jobs — the apply engine
+# handles those via try_ats_apply (Greenhouse/Lever/Workday) and falls back to a
+# manual-apply Telegram button. Set EASY_APPLY_ONLY=yes in ~/.env to restrict.
+EASY_APPLY_ONLY = config.get("EASY_APPLY_ONLY", "no").strip().lower() == "yes"
+
 # Job search keywords (drive the LinkedIn search queries)
 JOB_KEYWORDS = [
     "Software Engineer Ireland",
@@ -518,14 +524,19 @@ async def login_linkedin_visible():
 
 
 async def search_jobs(page, keyword):
-    """Search LinkedIn Easy Apply jobs and return job cards."""
+    """Search LinkedIn jobs and return job cards.
+
+    Restricted to Easy Apply when EASY_APPLY_ONLY is set; otherwise returns all
+    matching jobs (off-site ones are handled downstream by try_ats_apply).
+    """
     url = (
         f"https://www.linkedin.com/jobs/search/?"
         f"keywords={keyword.replace(' ', '%20')}"
         f"&location={LOCATION.replace(' ', '%20').replace(',', '%2C')}"
-        f"&f_LF=f_AL"  # Easy Apply only
         f"&sortBy=DD"
     )
+    if EASY_APPLY_ONLY:
+        url += "&f_LF=f_AL"  # Easy Apply only
     await page.goto(url, wait_until="domcontentloaded", timeout=30000)
     # Wait for job cards to render, then scroll to load more
     try:
