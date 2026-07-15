@@ -36,6 +36,78 @@ def send_telegram(text, parse_mode="Markdown"):
     send_jobs(text)
 
 
+def ensure_ref_ids():
+    """Give every job a short, human-friendly ref_id (J001, J002, ...) for chat lookups.
+
+    Idempotent: adds the column if missing and only fills rows that lack a ref_id,
+    numbering chronologically so J001 is the oldest job. Safe to call often.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("ALTER TABLE jobs ADD COLUMN ref_id TEXT")
+    except Exception:
+        pass  # column already exists
+    row = conn.execute(
+        "SELECT MAX(CAST(SUBSTR(ref_id, 2) AS INTEGER)) FROM jobs WHERE ref_id LIKE 'J%'"
+    ).fetchone()
+    n = row[0] or 0
+    missing = conn.execute(
+        "SELECT id FROM jobs WHERE ref_id IS NULL OR ref_id='' ORDER BY found_at ASC, rowid ASC"
+    ).fetchall()
+    for (jid,) in missing:
+        n += 1
+        conn.execute("UPDATE jobs SET ref_id=? WHERE id=?", (f"J{n:03d}", jid))
+    if missing:
+        conn.commit()
+    conn.close()
+
+
+def get_job_status(ref):
+    """Return a formatted status for one job matched by ref_id (e.g. J012) or a
+    partial LinkedIn ID. Used by the /jobstatus command and the chat tool."""
+    ensure_ref_ids()
+    ref = (ref or "").strip().upper().lstrip("#")
+    if not ref:
+        return "Tell me which job — give me its ID, e.g. `J012`."
+
+    # Normalize to a canonical ref_id: "J12", "j12", "12" -> "J012"
+    digits = ref[1:] if ref.startswith("J") else ref
+    canonical = f"J{int(digits):03d}" if digits.isdigit() else ref
+
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT ref_id, id, title, company, location, status, stage, "
+        "relevance_score, notes, applied_at, url "
+        "FROM jobs WHERE UPPER(ref_id)=? OR id LIKE ?",
+        (canonical, f"%{ref}%")
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        return f"❌ No job found matching `{ref}`. Use /mystatus to see IDs."
+    if len(rows) > 1:
+        matches = "\n".join(f"`{r[0]}` {r[2][:32]} @ {r[3][:20]}" for r in rows[:8])
+        return f"Multiple jobs match `{ref}` — pick one:\n{matches}"
+
+    ref_id, jid, title, company, location, status, stage, score, notes, applied_at, url = rows[0]
+    state = stage if stage and stage not in ("pending",) else status
+    emoji = STAGE_EMOJI.get(state, "•")
+    lines = [
+        f"{emoji} *{title}*  `{ref_id}`",
+        f"🏢 {company}" + (f"  •  📍 {location}" if location else ""),
+        f"📊 Status: *{(state or 'pending').replace('_', ' ').title()}*",
+    ]
+    if score:
+        lines.append(f"⭐ Match score: {score}/10")
+    if applied_at:
+        lines.append(f"📤 Applied: {applied_at[:10]}")
+    if notes:
+        lines.append(f"📝 {notes}")
+    if url:
+        lines.append(f"[View job]({url})")
+    return "\n".join(lines)
+
+
 def get_all_applications():
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute("""
@@ -79,7 +151,7 @@ def get_active_applications():
     """Jobs in active stages (not rejected/withdrawn)."""
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute("""
-        SELECT id, title, company, stage, applied_at
+        SELECT ref_id, title, company, stage, applied_at
         FROM jobs
         WHERE status NOT IN ('pending', 'skipped', 'approved', 'rejected', 'withdrawn', 'failed')
         ORDER BY applied_at DESC
@@ -89,6 +161,7 @@ def get_active_applications():
 
 
 def format_status_report():
+    ensure_ref_ids()
     counts = get_stage_counts()
     active = get_active_applications()
 
@@ -111,10 +184,11 @@ def format_status_report():
     if active:
         lines.append("*Active Pipeline:*")
         for job in active[:10]:
-            job_id, title, company, stage, applied_at = job
+            ref_id, title, company, stage, applied_at = job
             emoji = STAGE_EMOJI.get(stage, "📤")
             date = applied_at[:10] if applied_at else "?"
-            lines.append(f"{emoji} `{job_id[-6:]}` {title[:30]} @ {company[:20]} ({date})")
+            lines.append(f"{emoji} `{ref_id or '—'}` {title[:30]} @ {company[:20]} ({date})")
+        lines.append("\n_Ask me \"status of J012\" any time, or `/update J012 interview`._")
 
     return "\n".join(lines)
 
@@ -142,23 +216,28 @@ def handle_update_command(text):
                 "Stages: `applied` `phone_screen` `interview` `offer` `rejected` `withdrawn`\n\n"
                 "Example: `/update 633753 interview had a great screening call`")
 
-    job_suffix = parts[1].lower()
+    job_ref    = parts[1].strip()
     new_stage  = parts[2].lower().replace(" ", "_")
     note       = parts[3] if len(parts) > 3 else None
 
     if new_stage not in STAGES:
         return f"❌ Unknown stage `{new_stage}`.\nValid: {', '.join(STAGES)}"
 
-    # Find job by partial ID match
+    ensure_ref_ids()
+    # Accept a short ref_id (J012 / j12 / 12) or a partial LinkedIn ID
+    ref = job_ref.upper().lstrip("#")
+    digits = ref[1:] if ref.startswith("J") else ref
+    canonical = f"J{int(digits):03d}" if digits.isdigit() else ref
+
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT id, title, company FROM jobs WHERE id LIKE ?",
-        (f"%{job_suffix}%",)
+        "SELECT id, title, company FROM jobs WHERE UPPER(ref_id)=? OR id LIKE ?",
+        (canonical, f"%{job_ref}%")
     ).fetchall()
     conn.close()
 
     if not rows:
-        return f"❌ No job found matching `{job_suffix}`"
+        return f"❌ No job found matching `{job_ref}`"
     if len(rows) > 1:
         matches = "\n".join([f"`{r[0][-8:]}` — {r[1]} @ {r[2]}" for r in rows[:5]])
         return f"Multiple matches — be more specific:\n{matches}"

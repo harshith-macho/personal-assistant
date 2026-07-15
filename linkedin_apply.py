@@ -189,6 +189,7 @@ def init_db():
         ("description",     "TEXT"),
         ("apply_method",    "TEXT"),
         ("pending_fields",  "TEXT"),
+        ("ref_id",          "TEXT"),   # short human-friendly id (J001, J002, ...)
     ]:
         try:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {definition}")
@@ -196,6 +197,12 @@ def init_db():
             pass
     conn.commit()
     conn.close()
+    # Backfill short ref_ids for any rows missing one
+    try:
+        from job_tracker import ensure_ref_ids
+        ensure_ref_ids()
+    except Exception as e:
+        print(f"ref_id backfill skipped: {e}")
 
 
 def save_job(job):
@@ -209,6 +216,12 @@ def save_job(job):
     except Exception:
         pass
     conn.close()
+    # Assign a short ref_id (J001, ...) to this newly-saved job if it lacks one
+    try:
+        from job_tracker import ensure_ref_ids
+        ensure_ref_ids()
+    except Exception as e:
+        print(f"ref_id assign skipped: {e}")
 
 
 def update_job_status(job_id, status, category=None):
@@ -305,15 +318,29 @@ def _approve_job(job_id, apply_method):
     return row
 
 
+def _get_ref_id(job_id):
+    """Fetch the short ref_id (J001, ...) for a job, or '' if not assigned yet."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT ref_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+        conn.close()
+        return row[0] if row and row[0] else ""
+    except Exception:
+        return ""
+
+
 def send_job_for_approval(job, score=None):
     kw_score, matched = _match_score(job["title"])
     is_strong = kw_score >= 1
 
     score_badge = f"  ⭐ `{score}/10`" if score else ""
     header = "🔥 *Strong Match!*\n\n" if is_strong else ""
+    ref_id = _get_ref_id(job["id"])
+    ref_line = f"🆔 `{ref_id}`\n" if ref_id else ""
     text = (
         f"{header}💼 *New Job Found*{score_badge}\n\n"
         f"*{job['title']}*\n"
+        f"{ref_line}"
         f"🏢 {job['company']}\n"
         f"📍 {job['location']}\n\n"
         f"[View Job]({job['url']})"

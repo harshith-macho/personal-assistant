@@ -202,12 +202,23 @@ TOOLS = [
     },
     {
         "name": "get_job_applications",
-        "description": "Get Harshith's job application pipeline from the database.",
+        "description": "Get Harshith's full job application pipeline/summary from the database. Each job has a short ref id like J012.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "stage": {"type": "string", "description": "Filter by stage: applied, phone_screen, interview, offer, rejected. Leave empty for all."}
             }
+        }
+    },
+    {
+        "name": "get_job_status",
+        "description": "Look up the current status of ONE specific job application by its short reference ID (e.g. J012, J7) or a partial LinkedIn job ID. Use this whenever Harshith asks about a particular role by its ID, e.g. 'what's the status of J12?' or 'did I apply to J005?'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ref_id": {"type": "string", "description": "The job's short reference ID, e.g. J012 (also accepts j12, 12, or a partial LinkedIn ID)."}
+            },
+            "required": ["ref_id"]
         }
     },
     {
@@ -326,6 +337,10 @@ def execute_tool(name, params):
         elif name == "get_job_applications":
             from job_tracker import format_status_report
             return format_status_report()
+
+        elif name == "get_job_status":
+            from job_tracker import get_job_status
+            return get_job_status(params.get("ref_id", ""))
 
         elif name == "fetch_emails":
             from email_bot import fetch_recent_emails, summarize_with_claude
@@ -484,6 +499,14 @@ def handle_command(text):
         except Exception as e:
             return f"⚠️ Error: {e}"
 
+    if cmd.startswith("/jobstatus"):
+        try:
+            from job_tracker import get_job_status
+            ref = text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else ""
+            return get_job_status(ref)
+        except Exception as e:
+            return f"⚠️ Error: {e}"
+
     if cmd.startswith("/update"):
         try:
             return handle_update_command(text)
@@ -606,6 +629,7 @@ def handle_command(text):
                 "/findjobs — search jobs (manual approval mode)\n"
                 "/applyjobs — apply to manually approved jobs\n"
                 "/mystatus — view all applications + pipeline\n"
+                "/jobstatus [id] — status of one job by its ref id (e.g. J012)\n"
                 "/analytics — funnel, match quality, networking & feed stats\n"
                 "/update [id] [stage] [note] — update application stage\n"
                 "  Stages: applied phone\\_screen interview offer rejected\n\n"
