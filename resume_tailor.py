@@ -6,6 +6,8 @@ Resume Auto-Tailor
 - Generates a clean, ATS-parseable PDF and returns its path
 """
 
+from __future__ import annotations  # allow PEP-604 (str | None) annotations on Python 3.9
+
 import anthropic
 import sqlite3
 import re

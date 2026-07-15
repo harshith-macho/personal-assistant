@@ -7,6 +7,8 @@ Resume Improvement Engine
 - On approval, writes the suggestion into the correct resume section
 """
 
+from __future__ import annotations  # allow PEP-604 (str | None) annotations on Python 3.9
+
 import anthropic
 import sqlite3
 import json
