@@ -22,3 +22,6 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
+
+# Python virtualenv (local, do not commit)
+.venv/
