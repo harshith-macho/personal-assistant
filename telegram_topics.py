@@ -49,3 +49,30 @@ def send_emails(text, **kwargs): return send(text, "emails", **kwargs)
 def send_jobs(text, **kwargs):   return send(text, "jobs",   **kwargs)
 def send_stocks(text, **kwargs): return send(text, "stocks", **kwargs)
 def send_daily(text, **kwargs):  return send(text, "daily",  **kwargs)
+
+
+def send_document(file_path, caption=None, topic="chat", reply_markup=None, filename=None):
+    """Send a file to a group topic, or personal chat if no group is set.
+
+    `filename` overrides the name Telegram shows/saves the file as — otherwise
+    it defaults to the file's own name on disk (often not human-readable).
+    """
+    payload = {"chat_id": _TARGET}
+    if caption:
+        payload["caption"] = caption
+        payload["parse_mode"] = "Markdown"
+    thread_id = TOPICS.get(topic, 0) if GROUP_ID else 0
+    if thread_id:
+        payload["message_thread_id"] = thread_id
+    if reply_markup:
+        import json
+        payload["reply_markup"] = json.dumps(reply_markup)
+    with open(file_path, "rb") as f:
+        resp = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendDocument",
+                              data=payload, files={"document": (filename or Path(file_path).name, f)})
+    if not resp.ok:
+        print(f"Telegram sendDocument error: {resp.status_code} {resp.text}")
+    return resp.ok
+
+
+def send_jobs_document(file_path, **kwargs): return send_document(file_path, topic="jobs", **kwargs)

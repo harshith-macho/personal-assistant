@@ -42,7 +42,7 @@ Long-polls `getUpdates` (30 s timeout). On each update:
 **On startup:** `startup_job_catchup()` resends any `pending` jobs found in the last 2 hours back to the Jobs topic (handles restarts mid-session).
 
 **Background threads (all daemon, started in `start_background_tasks()`):**
-- `_job_search_worker` — triggers `linkedin_apply.py autoapply` every 45 minutes
+- `_job_search_worker` — triggers `linkedin_apply.py find` every 45 minutes (approval-gated: finds + scores + sends to Telegram for approval; nothing applies until `/applyjobs` is run on the approved queue — switched from `autoapply` on 2026-07-28 after it was found submitting applications with fabricated resume content)
 - `_health_check_worker` — sends a health ping to the Jobs topic every 6 hours
 - `_networking_worker` — runs `linkedin_network.run_networking()` daily at 10am
 - `_tech_alerts_worker` — calls `linkedin_alerts.run_hourly()` every hour
@@ -94,14 +94,15 @@ The bot's `/mystatus` and `/update` commands call `format_status_report()` and `
 | `morning_briefing.py` | 8 am weekdays — calendar + emails summary |
 | `tech_digest.py` | 8:30 am weekdays — tech news digest |
 | `linkedin_jobs.py` | 9 am weekdays — parse LinkedIn job alert emails |
-| `linkedin_apply.py autoapply` | Every 2 h weekdays — auto-apply loop |
 | `job_tracker.py` | 6 pm weekdays — daily pipeline summary |
+
+**Note (2026-07-28):** no crontab is actually installed on this machine (`crontab -l` → none) — this table describes intended schedules, not what's running. The only live scheduling is the LaunchAgent-managed `bot_server.py` background threads above. A `linkedin_apply.py autoapply` cron row previously listed here was removed since that command bypasses approval — don't re-add it without approval gating.
 
 ## Slash commands
 
 | Command | Description |
 |---|---|
-| `/autoapply` | Find + apply to all new Easy Apply jobs automatically (no approval) |
+| `/autoapply` | **Disabled 2026-07-28** — used to find + apply with no approval step and no JD scoring; this is what sent fabricated resumes to real companies. Use `/findjobs` + `/applyjobs` instead. |
 | `/findjobs` | Search jobs and send each to Jobs topic for manual approval |
 | `/applyjobs` | Apply only to jobs manually approved via `/findjobs` |
 | `/mystatus` | Show full job application pipeline |

@@ -544,15 +544,12 @@ def handle_command(text):
             return f"⚠️ Error: {e}"
 
     if cmd == "/autoapply":
-        try:
-            log_file = open(BASE / "bot.log", "a")
-            subprocess.Popen(
-                [PYTHON, "-u", str(BASE / "linkedin_apply.py"), "autoapply"],
-                stdout=log_file, stderr=log_file
-            )
-            return "🤖 Auto-applying to all new Easy Apply jobs — no approval needed! Updates coming shortly."
-        except Exception as e:
-            return f"⚠️ Error: {e}"
+        return (
+            "🚫 *Disabled (2026-07-28).*\n"
+            "This used to apply with no approval step and no per-job JD scoring — "
+            "it's how fabricated resumes went out to real companies. "
+            "Use `/findjobs` to search + review, then `/applyjobs` to submit what you approved."
+        )
 
     if cmd == "/digest":
         try:
@@ -625,7 +622,7 @@ def handle_command(text):
     if cmd == "/help":
         return ("🤖 *Available Commands:*\n\n"
                 "*Job Search:*\n"
-                "/autoapply — find + apply to all new Easy Apply jobs automatically\n"
+                "/autoapply — disabled (bypassed approval); use /findjobs + /applyjobs\n"
                 "/findjobs — search jobs (manual approval mode)\n"
                 "/applyjobs — apply to manually approved jobs\n"
                 "/mystatus — view all applications + pipeline\n"
@@ -685,15 +682,20 @@ def startup_job_catchup():
 
 
 def _job_search_worker():
-    """Background thread: trigger a LinkedIn job search every 45 minutes."""
+    """Background thread: trigger a LinkedIn job search every 45 minutes.
+
+    Approval-gated: this only finds + scores + sends jobs to Telegram for
+    you to tap Auto Apply / Skip. Nothing gets submitted until you run
+    /applyjobs on the approved queue.
+    """
     while True:
         time.sleep(45 * 60)
         try:
             subprocess.Popen(
-                [PYTHON, str(BASE / "linkedin_apply.py"), "autoapply"],
+                [PYTHON, str(BASE / "linkedin_apply.py"), "find"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
-            print(f"[{datetime.now().strftime('%H:%M')}] Auto job search + apply triggered.")
+            print(f"[{datetime.now().strftime('%H:%M')}] Auto job search triggered (approval-gated).")
         except Exception as e:
             print(f"Job search worker error: {e}")
 
@@ -737,11 +739,11 @@ def _linkedin_courses_worker():
 def _resume_update_worker():
     """Background thread: run resume improvement analysis every Sunday at 9am."""
     import asyncio
+    from datetime import timedelta
     while True:
         now = datetime.now()
         days_until_sunday = (6 - now.weekday()) % 7 or 7
-        target = now.replace(hour=9, minute=0, second=0, microsecond=0)
-        target = target.replace(day=now.day + days_until_sunday)
+        target = (now + timedelta(days=days_until_sunday)).replace(hour=9, minute=0, second=0, microsecond=0)
         time.sleep((target - now).total_seconds())
         try:
             from resume_updater import run_resume_update

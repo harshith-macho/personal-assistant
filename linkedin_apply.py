@@ -383,14 +383,49 @@ def handle_callback(update):
         row = conn.execute("SELECT title, company, url FROM jobs WHERE id=?", (job_id,)).fetchone()
         conn.commit()
         conn.close()
-        if row:
-            markup = {"inline_keyboard": [[{"text": "🌐 Open Job", "url": row[2]}]]}
+        if not row:
+            send_telegram("📎 Saved for manual apply.")
+            return
+        title, company, url = row
+        markup = {
+            "inline_keyboard": [
+                [{"text": "🌐 Open Job", "url": url}],
+                [{"text": "✅ Mark Applied", "callback_data": f"markapplied_{job_id}"}],
+            ]
+        }
+        try:
+            from resume_tailor import tailor_for_job
+            _, tailored_pdf = tailor_for_job({"id": job_id, "title": title, "company": company})
+        except Exception as e:
+            print(f"  Manual-apply resume tailor error: {e}")
+            tailored_pdf = None
+        if tailored_pdf:
             send_telegram(
-                f"📎 *Saved for manual apply*\n*{row[0]}* at {row[1]}\nTap below to open and apply yourself.",
+                f"📎 *Saved for manual apply*\n*{title}* at {company}\n"
+                f"Tailored resume saved to your resumes folder — tap below to open the job.",
                 reply_markup=markup
             )
         else:
-            send_telegram("📎 Saved for manual apply.")
+            send_telegram(
+                f"📎 *Saved for manual apply*\n*{title}* at {company}\n"
+                f"⚠️ Couldn't generate a tailored resume — use your base resume for this one.",
+                reply_markup=markup
+            )
+
+    elif data.startswith("markapplied_"):
+        job_id = data[12:]
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT title, company FROM jobs WHERE id=?", (job_id,)).fetchone()
+        conn.close()
+        if row:
+            from job_tracker import update_stage
+            update_stage(job_id, "applied")
+            send_telegram(
+                f"✅ Marked applied: *{row[0]}* at {row[1]}\n"
+                f"I'll track it in /mystatus — update it with `/update {job_id[-6:]} interview` etc. as it progresses."
+            )
+        else:
+            send_telegram("✅ Marked applied.")
 
     elif data.startswith("skip_"):
         job_id = data[5:]
@@ -1221,7 +1256,10 @@ def _generate_recruiter_note(first_name: str, job_title: str, company: str) -> s
 
 
 async def find_and_connect_recruiter(page, job):
-    """Search for recruiter/hiring manager at the company and send a connection request."""
+    """Search for recruiter/hiring manager at the company and send a connection request.
+
+    Returns {"name": str, "profile_url": str} on success, or None.
+    """
     try:
         company_slug = job["company"].lower().replace(" ", "%20")
         search_url = (
@@ -1242,6 +1280,13 @@ async def find_and_connect_recruiter(page, job):
 
                 name       = (await name_el.inner_text()).strip().split("\n")[0]
                 first_name = name.split()[0]
+
+                profile_url = ""
+                link_el = await card.query_selector("a.app-aware-link[href*='/in/']")
+                if link_el:
+                    href = await link_el.get_attribute("href")
+                    profile_url = href.split("?")[0] if href else ""
+
                 await connect_btn.click()
                 await page.wait_for_timeout(1500)
 
@@ -1259,7 +1304,7 @@ async def find_and_connect_recruiter(page, job):
                 if send_btn:
                     await send_btn.click()
                     await page.wait_for_timeout(1000)
-                    return name
+                    return {"name": name, "profile_url": profile_url}
 
                 # Close modal if send failed
                 close = await page.query_selector("button[aria-label='Dismiss']")
@@ -1602,10 +1647,15 @@ async def apply_approved():
                         conn = sqlite3.connect(DB_PATH)
                         conn.execute(
                             "UPDATE jobs SET recruiter=? WHERE id=?",
-                            (recruiter, job["id"])
+                            (recruiter["name"], job["id"])
                         )
                         conn.commit()
                         conn.close()
+                        try:
+                            from job_export import export_recruiter
+                            export_recruiter(job, recruiter)
+                        except Exception as e:
+                            print(f"  Recruiter export error: {e}")
                         send_telegram(f"🤝 Connection request sent to recruiter at *{job['company']}*")
                 except Exception as e:
                     print(f"  Recruiter outreach error: {e}")
@@ -1627,18 +1677,36 @@ async def apply_approved():
                 else:
                     update_job_status(job["id"], "needs_manual", category=category)
                     score_info = f" ⭐{job.get('relevance_score', '')}" if job.get("relevance_score") else ""
-                    markup = {"inline_keyboard": [[{"text": "🌐 Apply Manually Now", "url": external_url}]]}
+                    markup = {
+                        "inline_keyboard": [
+                            [{"text": "🌐 Apply Manually Now", "url": external_url}],
+                            [{"text": "📎 I'll Apply", "callback_data": f"iapply_{job['id']}"},
+                             {"text": "❌ Skip", "callback_data": f"skip_{job['id']}"}],
+                        ]
+                    }
                     send_telegram(
                         f"👆 *Manual Apply Needed*\n\n"
                         f"*{job['title']}*{score_info}\n"
                         f"🏢 {job['company']}\n"
                         f"📍 {job.get('location', 'Ireland')}\n"
                         f"🏷 `[{category}]`\n\n"
-                        f"Auto-apply couldn't complete this one. Tap below to finish it yourself 👇",
+                        f"Auto-apply couldn't complete this one. Tap the link to finish it yourself, or tap "
+                        f"I'll Apply to get a tailored resume for it 👇",
                         reply_markup=markup
                     )
             else:
-                send_telegram(f"⚠️ Could not apply to *{job['title']}* at {job['company']} — no apply button found.")
+                update_job_status(job["id"], "needs_manual", category=category)
+                markup = {
+                    "inline_keyboard": [
+                        [{"text": "📎 I'll Apply", "callback_data": f"iapply_{job['id']}"},
+                         {"text": "❌ Skip", "callback_data": f"skip_{job['id']}"}],
+                    ]
+                }
+                send_telegram(
+                    f"⚠️ *Auto Apply failed*\n\n*{job['title']}* at {job['company']}\n"
+                    f"Couldn't find an apply button or hit an error automating it. What would you like to do?",
+                    reply_markup=markup
+                )
 
             await asyncio.sleep(5)
 
@@ -1755,9 +1823,14 @@ async def auto_apply():
                     recruiter = await find_and_connect_recruiter(page, job)
                     if recruiter:
                         conn = sqlite3.connect(DB_PATH)
-                        conn.execute("UPDATE jobs SET recruiter=? WHERE id=?", (recruiter, job["id"]))
+                        conn.execute("UPDATE jobs SET recruiter=? WHERE id=?", (recruiter["name"], job["id"]))
                         conn.commit()
                         conn.close()
+                        try:
+                            from job_export import export_recruiter
+                            export_recruiter(job, recruiter)
+                        except Exception as e:
+                            print(f"  Recruiter export error: {e}")
                         send_telegram(f"🤝 Recruiter outreach sent at *{job['company']}*")
                 except Exception as e:
                     print(f"  Recruiter error: {e}")

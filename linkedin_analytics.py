@@ -79,6 +79,9 @@ def _applications_section(conn):
     needs = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE status IN ('needs_answer','needs_manual')"
     ).fetchone()[0]
+    saved_manual = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE status='manual'"
+    ).fetchone()[0]
 
     placeholders = ",".join("?" * len(ADVANCED_STAGES))
     advanced = conn.execute(
@@ -97,6 +100,7 @@ def _applications_section(conn):
         f"• Skipped (low score): {skipped}  |  Failed: {failed}",
         f"• Approved (queued, not yet applied): {queued}",
         f"• Awaiting approval: {pending}  |  Needs answer: {needs}",
+        f"• Saved for manual apply (resume ready, not yet applied): {saved_manual}",
         f"• Responses (screen+): *{advanced}* ({_pct(advanced, applied)} of applied)",
         f"• Offers: {offers}  |  Rejected: {rejected}",
     ]

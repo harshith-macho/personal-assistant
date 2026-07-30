@@ -28,6 +28,8 @@ STAGE_EMOJI = {
     "withdrawn":    "🚫",
     "pending":      "⏳",
     "skipped":      "⏭️",
+    "manual":       "📎",
+    "needs_manual": "⚠️",
 }
 
 
@@ -122,39 +124,71 @@ def get_all_applications():
 
 def update_stage(job_id, new_stage, note=None):
     conn = sqlite3.connect(DB_PATH)
+
+    # Stamp applied_at the first time a job transitions to "applied" — needed for
+    # the "Applied: <date>" display and for ORDER BY applied_at in the pipeline
+    # views. Don't clobber it if it's already set (e.g. bot already stamped it).
+    stamp_applied_at = False
+    if new_stage == "applied":
+        existing = conn.execute("SELECT applied_at FROM jobs WHERE id=?", (job_id,)).fetchone()
+        stamp_applied_at = not (existing and existing[0])
+
+    fields, params = ["stage=?", "status=?"], [new_stage, new_stage]
     if note:
-        conn.execute(
-            "UPDATE jobs SET stage=?, status=?, notes=? WHERE id=?",
-            (new_stage, new_stage, note, job_id)
-        )
-    else:
-        conn.execute(
-            "UPDATE jobs SET stage=?, status=? WHERE id=?",
-            (new_stage, new_stage, job_id)
-        )
+        fields.append("notes=?")
+        params.append(note)
+    if stamp_applied_at:
+        fields.append("applied_at=?")
+        params.append(datetime.now().isoformat())
+    params.append(job_id)
+    conn.execute(f"UPDATE jobs SET {', '.join(fields)} WHERE id=?", params)
     conn.commit()
     conn.close()
 
 
 def get_stage_counts():
+    """Counts by pipeline stage, for jobs that were actually applied to.
+
+    Uses an allowlist (stage IN STAGES) rather than a denylist — jobs sitting in
+    non-pipeline statuses like 'manual' (saved for you to apply) or 'needs_manual'
+    (auto-apply failed) must never be counted here, or the total looks inflated.
+    """
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("""
-        SELECT stage, COUNT(*) FROM jobs
-        WHERE status NOT IN ('pending', 'skipped', 'approved', 'failed')
-        GROUP BY stage
-    """).fetchall()
+    placeholders = ",".join("?" * len(STAGES))
+    rows = conn.execute(
+        f"SELECT stage, COUNT(*) FROM jobs WHERE stage IN ({placeholders}) GROUP BY stage",
+        STAGES
+    ).fetchall()
     conn.close()
     return dict(rows)
 
 
 def get_active_applications():
-    """Jobs in active stages (not rejected/withdrawn)."""
+    """Jobs actually applied to, in active stages (not rejected/withdrawn)."""
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("""
+    active_stages = [s for s in STAGES if s not in ("rejected", "withdrawn")]
+    placeholders = ",".join("?" * len(active_stages))
+    rows = conn.execute(f"""
         SELECT ref_id, title, company, stage, applied_at
         FROM jobs
-        WHERE status NOT IN ('pending', 'skipped', 'approved', 'rejected', 'withdrawn', 'failed')
+        WHERE stage IN ({placeholders})
         ORDER BY applied_at DESC
+    """, active_stages).fetchall()
+    conn.close()
+    return rows
+
+
+def get_pending_action_jobs():
+    """Jobs that are NOT yet applied but need you to do something:
+    'manual' = saved for you to apply yourself, resume already generated.
+    'needs_manual' = auto-apply failed, waiting on you to pick I'll Apply / Skip.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("""
+        SELECT ref_id, id, title, company, status, found_at
+        FROM jobs
+        WHERE status IN ('manual', 'needs_manual')
+        ORDER BY found_at DESC
     """).fetchall()
     conn.close()
     return rows
@@ -164,21 +198,23 @@ def format_status_report():
     ensure_ref_ids()
     counts = get_stage_counts()
     active = get_active_applications()
+    pending_action = get_pending_action_jobs()
 
     total = sum(counts.values())
-    if total == 0:
+    if total == 0 and not pending_action:
         return "📋 *Application Tracker*\n\nNo applications yet. Use /findjobs to find jobs!"
 
     lines = ["📋 *Application Tracker*\n"]
 
-    # Summary counts
-    lines.append("*Summary:*")
-    for stage in STAGES:
-        count = counts.get(stage, 0)
-        if count:
-            emoji = STAGE_EMOJI.get(stage, "•")
-            lines.append(f"{emoji} {stage.replace('_', ' ').title()}: {count}")
-    lines.append(f"\n*Total applied: {total}*\n")
+    # Summary counts — only jobs actually applied to
+    if total:
+        lines.append("*Summary:*")
+        for stage in STAGES:
+            count = counts.get(stage, 0)
+            if count:
+                emoji = STAGE_EMOJI.get(stage, "•")
+                lines.append(f"{emoji} {stage.replace('_', ' ').title()}: {count}")
+        lines.append(f"\n*Total applied: {total}*\n")
 
     # Active pipeline
     if active:
@@ -188,7 +224,23 @@ def format_status_report():
             emoji = STAGE_EMOJI.get(stage, "📤")
             date = applied_at[:10] if applied_at else "?"
             lines.append(f"{emoji} `{ref_id or '—'}` {title[:30]} @ {company[:20]} ({date})")
-        lines.append("\n_Ask me \"status of J012\" any time, or `/update J012 interview`._")
+        if len(active) > 10:
+            lines.append(f"…and {len(active) - 10} more")
+        lines.append("")
+
+    # Needs your action — NOT counted as applied, kept clearly separate
+    if pending_action:
+        lines.append(f"*Needs Action ({len(pending_action)}):*")
+        label = {"manual": "saved, not yet applied", "needs_manual": "auto-apply failed"}
+        for ref_id, job_id, title, company, status, found_at in pending_action[:10]:
+            emoji = STAGE_EMOJI.get(status, "•")
+            lines.append(f"{emoji} `{ref_id or '—'}` {title[:30]} @ {company[:20]} — {label.get(status, status)}")
+        if len(pending_action) > 10:
+            lines.append(f"…and {len(pending_action) - 10} more")
+        lines.append("\n_Already applied to one of these? `/update J012 applied`._")
+
+    if active or total:
+        lines.append("_Ask me \"status of J012\" any time, or `/update J012 interview`._")
 
     return "\n".join(lines)
 
