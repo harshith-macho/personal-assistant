@@ -448,6 +448,8 @@ def execute_tool(name, params):
         elif name == "fetch_emails":
             from email_bot import fetch_recent_emails, summarize_with_claude
             emails = fetch_recent_emails(hours=params.get("hours", 1))
+            if emails:
+                post_and_index_emails(emails)  # so each one can be replied to directly
             return summarize_with_claude(emails)
 
         elif name == "compose_email":
@@ -589,9 +591,12 @@ def handle_command(text):
 
     if cmd == "/emails":
         try:
-            from email_bot import fetch_recent_emails, summarize_with_claude
+            from email_bot import fetch_recent_emails
             emails = fetch_recent_emails(hours=1)
-            return summarize_with_claude(emails)
+            if not emails:
+                return "No new emails in the last hour."
+            posted = post_and_index_emails(emails)
+            return f"📧 Posted {posted} email(s) above — reply to any of them directly to send a reply."
         except Exception as e:
             return f"⚠️ Could not fetch emails: {e}"
 
@@ -866,6 +871,41 @@ def _email_alert_worker():
             print(f"Email alert worker error: {e}")
 
 
+def post_and_index_emails(emails):
+    """Post each email to the Emails topic as its own Telegram message and index it
+    in EMAIL_INDEX, so any of them can be replied to directly. Shared by the hourly
+    digest worker, /emails, and the fetch_emails tool, so replying works the same
+    way no matter how the emails got surfaced. Returns how many were posted.
+    """
+    from telegram_topics import send_return_id
+    posted = 0
+    for e in emails:
+        # parse_mode=None: raw email subjects/bodies aren't Markdown-safe
+        # (stray * _ [ ] break Telegram's parser and silently drop the send)
+        text = (
+            f"📧 {e['subject']}\n"
+            f"From: {e['from'][:80]}\n"
+            f"To: {e['account']}\n"
+            f"Date: {e['date']}\n\n"
+            f"{e['body'][:1200]}\n\n"
+            f"— Reply to this message to send a reply from {e['account']}."
+        )
+        tg_id = send_return_id(text, topic="emails", parse_mode=None)
+        if tg_id:
+            posted += 1
+            EMAIL_INDEX[str(tg_id)] = {
+                "account":     e["account"],
+                "from_addr":   e["from"],
+                "subject":     e["subject"],
+                "body":        e["body"],
+                "message_id":  e.get("message_id", ""),
+                "references":  e.get("references", ""),
+            }
+    if posted:
+        _save_email_index(EMAIL_INDEX)
+    return posted
+
+
 def _email_digest_worker():
     """Background thread: post every new email of the last hour to the Emails topic,
     one Telegram message each, so Harshith can reply to any of them directly.
@@ -873,36 +913,13 @@ def _email_digest_worker():
     Runs alongside _email_alert_worker (which only pings on priority keyword matches) —
     this posts everything, priority or not.
     """
-    from telegram_topics import send_return_id
     while True:
         time.sleep(3600)
         try:
             from email_bot import fetch_recent_emails
             emails = fetch_recent_emails(hours=1)
-            for e in emails:
-                # parse_mode=None: raw email subjects/bodies aren't Markdown-safe
-                # (stray * _ [ ] break Telegram's parser and silently drop the send)
-                text = (
-                    f"📧 {e['subject']}\n"
-                    f"From: {e['from'][:80]}\n"
-                    f"To: {e['account']}\n"
-                    f"Date: {e['date']}\n\n"
-                    f"{e['body'][:1200]}\n\n"
-                    f"— Reply to this message to send a reply from {e['account']}."
-                )
-                tg_id = send_return_id(text, topic="emails", parse_mode=None)
-                if tg_id:
-                    EMAIL_INDEX[str(tg_id)] = {
-                        "account":     e["account"],
-                        "from_addr":   e["from"],
-                        "subject":     e["subject"],
-                        "body":        e["body"],
-                        "message_id":  e.get("message_id", ""),
-                        "references":  e.get("references", ""),
-                    }
-            if emails:
-                _save_email_index(EMAIL_INDEX)
-            print(f"[{datetime.now().strftime('%H:%M')}] Hourly email digest: {len(emails)} email(s) posted.")
+            posted = post_and_index_emails(emails)
+            print(f"[{datetime.now().strftime('%H:%M')}] Hourly email digest: {posted} email(s) posted.")
         except Exception as e:
             print(f"Email digest worker error: {e}")
 
