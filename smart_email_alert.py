@@ -23,7 +23,7 @@ ANTHROPIC_KEY  = config.get("ANTHROPIC_API_KEY")
 
 GMAIL_ACCOUNTS = [
     (config.get(f"GMAIL_ADDRESS_{i}"), config.get(f"GMAIL_APP_PASSWORD_{i}"))
-    for i in range(1, 4)
+    for i in range(1, 100)
     if config.get(f"GMAIL_ADDRESS_{i}") and config.get(f"GMAIL_APP_PASSWORD_{i}")
 ]
 

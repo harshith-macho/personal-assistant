@@ -23,12 +23,12 @@ TELEGRAM_CHAT   = config.get("TELEGRAM_CHAT_ID")
 
 GMAIL_ACCOUNTS = [
     (config.get(f"GMAIL_ADDRESS_{i}"), config.get(f"GMAIL_APP_PASSWORD_{i}"))
-    for i in range(1, 4)
+    for i in range(1, 100)
     if config.get(f"GMAIL_ADDRESS_{i}") and config.get(f"GMAIL_APP_PASSWORD_{i}")
 ]
 
 
-def fetch_recent_emails_from_account(address, app_password, hours=2):
+def fetch_recent_emails_from_account(address, app_password, hours=1):
     """Fetch emails from a single Gmail account received in the last N hours."""
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(address, app_password)
@@ -74,14 +74,16 @@ def fetch_recent_emails_from_account(address, app_password, hours=2):
             "subject": subject,
             "from": sender,
             "date": date_str,
-            "body": body[:1500]
+            "body": body[:1500],
+            "message_id": msg.get("Message-ID", ""),
+            "references": msg.get("References", ""),
         })
 
     mail.logout()
     return emails
 
 
-def fetch_recent_emails(hours=2):
+def fetch_recent_emails(hours=1):
     """Fetch emails from all configured Gmail accounts."""
     all_emails = []
     for address, app_password in GMAIL_ACCOUNTS:
@@ -97,7 +99,7 @@ def fetch_recent_emails(hours=2):
 def summarize_with_claude(emails):
     """Send emails to Claude for summarization."""
     if not emails:
-        return "No new emails in the last 2 hours."
+        return "No new emails in the last hour."
 
     email_text = ""
     for i, e in enumerate(emails, 1):
@@ -132,7 +134,7 @@ def run():
     now = datetime.now().strftime("%b %d, %Y %I:%M %p")
     print(f"[{now}] Fetching emails...")
 
-    emails = fetch_recent_emails(hours=2)
+    emails = fetch_recent_emails(hours=1)
     print(f"Found {len(emails)} emails.")
 
     email_summary = summarize_with_claude(emails)

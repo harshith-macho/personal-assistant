@@ -69,6 +69,32 @@ TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 # Conversation history for context (last 20 messages)
 conversation_history = []
 
+# Telegram message_id -> fetched email metadata, so a native Telegram "reply" to
+# an email digest message can be matched back to the email it's replying to.
+EMAIL_INDEX_FILE = BASE / "email_index.json"
+
+
+def _load_email_index():
+    if EMAIL_INDEX_FILE.exists():
+        try:
+            return json.loads(EMAIL_INDEX_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_email_index(index):
+    # Keep only the most recent 300 entries to avoid unbounded growth
+    trimmed = dict(list(index.items())[-300:])
+    EMAIL_INDEX_FILE.write_text(json.dumps(trimmed))
+
+
+EMAIL_INDEX = _load_email_index()
+
+# Pending outbound email drafts awaiting Send/Cancel approval (draft_id -> draft dict).
+# In-memory only, like conversation_history — resets on restart.
+PENDING_EMAIL_DRAFTS = {}
+
 SYSTEM_PROMPT = """You are Jerviss, Harshith Mittapally's personal AI assistant. Here's everything you know about him:
 
 PERSONAL:
@@ -121,7 +147,7 @@ Be concise, friendly, and helpful. Keep responses short — this is Telegram, no
 Use emojis occasionally. Help with job hunting, AWS/cloud advice, ML questions, email summaries, and anything else Harshith needs."""
 
 
-def send_message(text, parse_mode="Markdown", thread_id=None, src_chat_id=None):
+def send_message(text, parse_mode="Markdown", thread_id=None, src_chat_id=None, reply_markup=None):
     """Send a message back to where it came from, or the group topic if not specified."""
     from telegram_topics import GROUP_ID, TOPICS, _TARGET
     # Reply directly to the originating chat (DM or different group)
@@ -132,6 +158,8 @@ def send_message(text, parse_mode="Markdown", thread_id=None, src_chat_id=None):
         effective_thread = thread_id if thread_id else (TOPICS["chat"] if GROUP_ID else 0)
         if effective_thread:
             payload["message_thread_id"] = effective_thread
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
     resp = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
     return resp.ok
 
@@ -158,6 +186,41 @@ def is_authorized(msg):
     chat_type = chat.get("type", "")
     from telegram_topics import GROUP_ID
     return chat_id == TELEGRAM_CHAT or chat_id == str(GROUP_ID) or chat_type in ("group", "supergroup")
+
+
+def handle_email_callback(update):
+    """Send or discard a pending email draft (from a reply or /compose_email) on button tap."""
+    cb        = update.get("callback_query", {})
+    data      = cb.get("data", "")
+    cb_id     = cb.get("id")
+    chat_id   = str(cb.get("message", {}).get("chat", {}).get("id", ""))
+    thread_id = cb.get("message", {}).get("message_thread_id")
+
+    is_send  = data.startswith("em_send_")
+    draft_id = data[len("em_send_"):] if is_send else data[len("em_cancel_"):]
+    draft    = PENDING_EMAIL_DRAFTS.pop(draft_id, None)
+
+    if not draft:
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery",
+                       json={"callback_query_id": cb_id, "text": "Draft expired or already handled."})
+        return
+
+    if not is_send:
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "Cancelled."})
+        send_message("🗑️ Draft discarded — nothing sent.", thread_id=thread_id, src_chat_id=chat_id)
+        return
+
+    try:
+        from email_actions import send_via_smtp
+        send_via_smtp(
+            draft["from_account"], draft["to"], draft["subject"], draft["body"],
+            in_reply_to=draft.get("in_reply_to"), references=draft.get("references")
+        )
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "Sent!"})
+        send_message(f"✅ Sent to {draft['to']} from {draft['from_account']}.", thread_id=thread_id, src_chat_id=chat_id)
+    except Exception as e:
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "Failed to send."})
+        send_message(f"⚠️ Failed to send email: {e}", thread_id=thread_id, src_chat_id=chat_id)
 
 
 TOOLS = [
@@ -229,6 +292,20 @@ TOOLS = [
             "properties": {
                 "hours": {"type": "integer", "description": "How many hours back to look (default 2)"}
             }
+        }
+    },
+    {
+        "name": "compose_email",
+        "description": "Draft a new email to send from Harshith's Gmail. Write a complete, polished email body yourself based on the conversation — don't just pass Harshith's raw instruction through. The draft is posted to the Emails topic for Harshith to approve before it actually sends; nothing sends automatically.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to":      {"type": "string", "description": "Recipient email address"},
+                "subject": {"type": "string", "description": "Email subject line"},
+                "body":    {"type": "string", "description": "Full email body text, polished and ready to send"},
+                "account": {"type": "string", "description": "Which of Harshith's Gmail accounts to send from (optional — defaults to his primary account)"}
+            },
+            "required": ["to", "subject", "body"]
         }
     },
     {
@@ -344,8 +421,36 @@ def execute_tool(name, params):
 
         elif name == "fetch_emails":
             from email_bot import fetch_recent_emails, summarize_with_claude
-            emails = fetch_recent_emails(hours=params.get("hours", 2))
+            emails = fetch_recent_emails(hours=params.get("hours", 1))
             return summarize_with_claude(emails)
+
+        elif name == "compose_email":
+            import uuid
+            from email_actions import ACCOUNTS, DEFAULT_ACCOUNT
+            from telegram_topics import send as send_topic
+            account = params.get("account") or DEFAULT_ACCOUNT
+            if account not in ACCOUNTS:
+                account = DEFAULT_ACCOUNT
+            draft_id = uuid.uuid4().hex[:10]
+            PENDING_EMAIL_DRAFTS[draft_id] = {
+                "from_account": account,
+                "to":           params["to"],
+                "subject":      params["subject"],
+                "body":         params["body"],
+                "in_reply_to":  None,
+                "references":   None,
+            }
+            send_topic(
+                f"✉️ New email draft — from {account}\n"
+                f"To: {params['to']}\nSubject: {params['subject']}\n\n{params['body']}",
+                topic="emails",
+                parse_mode=None,
+                reply_markup={"inline_keyboard": [[
+                    {"text": "✅ Send",   "callback_data": f"em_send_{draft_id}"},
+                    {"text": "❌ Cancel", "callback_data": f"em_cancel_{draft_id}"}
+                ]]}
+            )
+            return "📧 Draft posted to the Emails topic for your approval — it won't send until you tap Send."
 
         elif name == "check_stocks":
             subprocess.Popen(
@@ -459,7 +564,7 @@ def handle_command(text):
     if cmd == "/emails":
         try:
             from email_bot import fetch_recent_emails, summarize_with_claude
-            emails = fetch_recent_emails(hours=2)
+            emails = fetch_recent_emails(hours=1)
             return summarize_with_claude(emails)
         except Exception as e:
             return f"⚠️ Could not fetch emails: {e}"
@@ -640,7 +745,7 @@ def handle_command(text):
                 "/digest — fetch today's tech digest (AWS, .NET, Kafka, fintech)\n\n"
                 "*Daily:*\n"
                 "/schedule — today's calendar\n"
-                "/emails — last 2hrs email summary\n"
+                "/emails — last 1hr email summary\n"
                 "/jobs — LinkedIn job alerts from Gmail\n"
                 "/stocks — check stock drops now\n"
                 "/post [topic] — post to LinkedIn\n\n"
@@ -723,6 +828,59 @@ def _tech_alerts_worker():
             print(f"Tech alerts worker error: {e}")
 
 
+def _email_alert_worker():
+    """Background thread: scan Gmail for priority emails (interview/offer/recruiter/rejection) every hour."""
+    while True:
+        time.sleep(3600)
+        try:
+            from smart_email_alert import check_priority_emails
+            check_priority_emails()
+            print(f"[{datetime.now().strftime('%H:%M')}] Hourly priority email scan done.")
+        except Exception as e:
+            print(f"Email alert worker error: {e}")
+
+
+def _email_digest_worker():
+    """Background thread: post every new email of the last hour to the Emails topic,
+    one Telegram message each, so Harshith can reply to any of them directly.
+
+    Runs alongside _email_alert_worker (which only pings on priority keyword matches) —
+    this posts everything, priority or not.
+    """
+    from telegram_topics import send_return_id
+    while True:
+        time.sleep(3600)
+        try:
+            from email_bot import fetch_recent_emails
+            emails = fetch_recent_emails(hours=1)
+            for e in emails:
+                # parse_mode=None: raw email subjects/bodies aren't Markdown-safe
+                # (stray * _ [ ] break Telegram's parser and silently drop the send)
+                text = (
+                    f"📧 {e['subject']}\n"
+                    f"From: {e['from'][:80]}\n"
+                    f"To: {e['account']}\n"
+                    f"Date: {e['date']}\n\n"
+                    f"{e['body'][:1200]}\n\n"
+                    f"— Reply to this message to send a reply from {e['account']}."
+                )
+                tg_id = send_return_id(text, topic="emails", parse_mode=None)
+                if tg_id:
+                    EMAIL_INDEX[str(tg_id)] = {
+                        "account":     e["account"],
+                        "from_addr":   e["from"],
+                        "subject":     e["subject"],
+                        "body":        e["body"],
+                        "message_id":  e.get("message_id", ""),
+                        "references":  e.get("references", ""),
+                    }
+            if emails:
+                _save_email_index(EMAIL_INDEX)
+            print(f"[{datetime.now().strftime('%H:%M')}] Hourly email digest: {len(emails)} email(s) posted.")
+        except Exception as e:
+            print(f"Email digest worker error: {e}")
+
+
 def _linkedin_courses_worker():
     """Background thread: scan LinkedIn Learning for new courses every 6 hours."""
     import asyncio
@@ -755,12 +913,13 @@ def _resume_update_worker():
 def _networking_worker():
     """Background thread: run LinkedIn networking once per day at 10am."""
     import asyncio
+    from datetime import timedelta
     while True:
         now = datetime.now()
         # Sleep until 10am today (or tomorrow if already past)
         target = now.replace(hour=10, minute=0, second=0, microsecond=0)
         if now >= target:
-            target = target.replace(day=target.day + 1)
+            target = target + timedelta(days=1)
         time.sleep((target - now).total_seconds())
         try:
             from linkedin_network import run_networking
@@ -778,6 +937,8 @@ def start_background_tasks():
         _resume_update_worker,
         _tech_alerts_worker,
         _linkedin_courses_worker,
+        _email_alert_worker,
+        _email_digest_worker,
     ):
         threading.Thread(target=worker, daemon=True).start()
 
@@ -839,6 +1000,8 @@ def run():
                         elif data.startswith(("ru_yes_", "ru_no_")):
                             from resume_updater import handle_resume_callback
                             handle_resume_callback(update)
+                        elif data.startswith(("em_send_", "em_cancel_")):
+                            handle_email_callback(update)
                         else:
                             from linkedin_apply import handle_callback
                             handle_callback(update)
@@ -863,6 +1026,42 @@ def run():
                     if reply:
                         send_message(reply, thread_id=thread_id, src_chat_id=src_chat_id)
                         continue
+
+                # Intercept a native Telegram "reply" to a fetched email -> draft + send an email reply
+                _reply_to = msg.get("reply_to_message") or {}
+                _reply_to_id = str(_reply_to.get("message_id", ""))
+                if _reply_to_id in EMAIL_INDEX and not text.startswith("/"):
+                    try:
+                        import uuid
+                        from email_actions import polish_reply, DEFAULT_ACCOUNT
+                        original = EMAIL_INDEX[_reply_to_id]
+                        polished = polish_reply(original, text)
+                        subject = original["subject"]
+                        if not subject.lower().startswith("re:"):
+                            subject = f"Re: {subject}"
+                        draft_id = uuid.uuid4().hex[:10]
+                        # References = prior chain + this message's own ID (RFC 2822 threading)
+                        _references = f"{original.get('references', '')} {original.get('message_id', '')}".strip() or None
+                        PENDING_EMAIL_DRAFTS[draft_id] = {
+                            "from_account": original.get("account") or DEFAULT_ACCOUNT,
+                            "to":           original.get("from_addr", ""),
+                            "subject":      subject,
+                            "body":         polished,
+                            "in_reply_to":  original.get("message_id") or None,
+                            "references":   _references,
+                        }
+                        send_message(
+                            f"✉️ Draft reply to {original.get('from_addr', '')}\n"
+                            f"Subject: {subject}\n\n{polished}",
+                            parse_mode=None, thread_id=thread_id, src_chat_id=src_chat_id,
+                            reply_markup={"inline_keyboard": [[
+                                {"text": "✅ Send",   "callback_data": f"em_send_{draft_id}"},
+                                {"text": "❌ Cancel", "callback_data": f"em_cancel_{draft_id}"}
+                            ]]}
+                        )
+                    except Exception as e:
+                        send_message(f"⚠️ Couldn't draft that reply: {e}", thread_id=thread_id, src_chat_id=src_chat_id)
+                    continue
 
                 # Intercept replies when linkedin_apply.py is waiting for a form field answer
                 _qa_file = Path.home() / ".apply_qa.json"

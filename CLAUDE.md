@@ -48,6 +48,8 @@ Long-polls `getUpdates` (30 s timeout). On each update:
 - `_tech_alerts_worker` — calls `linkedin_alerts.run_hourly()` every hour
 - `_linkedin_courses_worker` — calls `linkedin_alerts.run_linkedin_courses()` every 6 hours
 - `_resume_update_worker` — calls `resume_updater.run_resume_update()` every Sunday at 9am
+- `_email_alert_worker` — calls `smart_email_alert.check_priority_emails()` every hour (scans Gmail for interview/offer/recruiter/rejection keywords, classifies urgency via Claude, posts to the Emails topic; dedupes seen messages via `seen_emails.json`)
+- `_email_digest_worker` (added 2026-08-02) — every hour, posts *every* new email from the last hour to the Emails topic as its own Telegram message (not just priority ones — runs alongside `_email_alert_worker`, doesn't replace it). Each message is indexed in `email_index.json` (Telegram message_id → account/from/subject/body/Message-ID/References) so a native Telegram reply to it can be matched back to the original email.
 
 **Callback routing (inline buttons):**
 - `fc_` / `fco_` / `fs_` prefixes → `linkedin_feed.handle_feed_callback` (comment/connect/skip)
@@ -59,6 +61,15 @@ Long-polls `getUpdates` (30 s timeout). On each update:
 ### Message routing — `telegram_topics.py`
 
 All outbound sends go through here. Reads `TELEGRAM_GROUP_ID` + `TELEGRAM_TOPIC_*` from `~/.env` and routes to the correct topic thread (`Chat`, `Emails`, `Jobs`, `Stocks`, `Daily`). If no group is configured, falls back to `TELEGRAM_CHAT_ID`.
+
+### Interactive email — `email_actions.py` (added 2026-08-02)
+
+Two ways to send outbound email, both approval-gated (nothing sends without a tap on an inline "✅ Send" button, same pattern as job auto-apply):
+
+- **Reply to a fetched email:** tap Telegram's native "Reply" on any message `_email_digest_worker` posted, type a rough reply (shorthand is fine). `bot_server.py` looks the original message up in `EMAIL_INDEX` (loaded from `email_index.json`), calls `email_actions.polish_reply()` to turn the rough text into a proper email body via Claude, and posts the draft back with Send/Cancel buttons. Sending goes out via `email_actions.send_via_smtp()` (Gmail SMTP, same App Password as IMAP) from whichever of the 3 configured accounts received the original, with `In-Reply-To`/`References` headers set so it threads correctly.
+- **Compose a new email:** just ask in chat (e.g. "email jane@x.com about rescheduling Friday's interview") — `ask_claude()`'s tool loop calls the `compose_email` tool, which requires Claude to have already written the full polished body itself (not a pass-through of the raw instruction). Posts to the Emails topic for approval the same way. Defaults to the primary Gmail account unless a specific one is given.
+
+Pending drafts live in `PENDING_EMAIL_DRAFTS` (in-memory, keyed by a short draft id in the button's `callback_data`) — resets on restart, same tradeoff as `conversation_history`.
 
 ### LinkedIn automation — `linkedin_apply.py` + `linkedin_auth.py`
 
@@ -88,9 +99,10 @@ The bot's `/mystatus` and `/update` commands call `format_status_report()` and `
 
 ### Scheduled scripts (run via cron, not the bot process)
 
+`smart_email_alert.py` moved out of this table on 2026-07-30 — it now runs hourly as `_email_alert_worker` inside `bot_server.py` (see Background threads above), not via cron.
+
 | Script | Schedule |
 |---|---|
-| `smart_email_alert.py` | Every 15 min — priority Gmail watch |
 | `morning_briefing.py` | 8 am weekdays — calendar + emails summary |
 | `tech_digest.py` | 8:30 am weekdays — tech news digest |
 | `linkedin_jobs.py` | 9 am weekdays — parse LinkedIn job alert emails |
@@ -114,7 +126,7 @@ The bot's `/mystatus` and `/update` commands call `format_status_report()` and `
 | `/resumeupdate` | Analyze recent job descriptions vs resume, post suggestions to Jobs topic |
 | `/alerts` | Fetch latest tech news, courses & LinkedIn updates (posts to Daily) |
 | `/schedule` | Post today's Google Calendar events to Daily topic |
-| `/emails` | Summarize last 2 hours of Gmail |
+| `/emails` | Summarize last 1 hour of Gmail |
 | `/stocks` | Trigger an immediate stock drop check |
 | `/jobs` | Parse LinkedIn job alert emails from Gmail |
 | `/post <topic>` | Generate and post to LinkedIn on the given topic |
@@ -138,6 +150,7 @@ Free-form text in any topic or DM goes to `ask_claude()`.
 | `resume_manager.py` | Standalone script (not wired into bot_server.py): receives a resume PDF, saves to role slots (`resume_cloud`, `resume_ml`, `resume_swe`, `resume_devops` under `resumes/`), and uploads to LinkedIn as default resume |
 | `job_tracker.py` | Schema defined in `init_db()`; two tables: `jobs` and `feed_posts` |
 | `calendar_bot.py` | Google Calendar API; timezone defaults to `America/Los_Angeles` |
+| `email_actions.py` | Outbound email: `send_via_smtp()` + `polish_reply()`; `ACCOUNTS`/`DEFAULT_ACCOUNT` map the 3 configured Gmail addresses |
 
 ## Gitignored files you must create locally
 

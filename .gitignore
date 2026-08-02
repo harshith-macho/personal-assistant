@@ -8,6 +8,7 @@ linkedin_session.json
 *.log
 bot.pid
 seen_emails.json
+email_index.json
 *.pid
 
 # Databases (personal data)

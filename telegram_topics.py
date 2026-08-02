@@ -44,6 +44,28 @@ def send(text, topic="chat", parse_mode="Markdown", reply_markup=None):
     return resp.ok
 
 
+def send_return_id(text, topic="chat", parse_mode="Markdown", reply_markup=None):
+    """Like send(), but returns the sent message's Telegram message_id (or None on failure)."""
+    payload = {
+        "chat_id":    _TARGET,
+        "text":       text,
+        "parse_mode": parse_mode,
+    }
+    thread_id = TOPICS.get(topic, 0) if GROUP_ID else 0
+    if thread_id:
+        payload["message_thread_id"] = thread_id
+    if reply_markup:
+        import json
+        payload["reply_markup"] = json.dumps(reply_markup)
+    if payload.get("parse_mode") is None:
+        payload.pop("parse_mode", None)
+    resp = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json=payload)
+    if not resp.ok:
+        print(f"Telegram error: {resp.status_code} {resp.text}")
+        return None
+    return resp.json().get("result", {}).get("message_id")
+
+
 def send_chat(text, **kwargs):   return send(text, "chat",   **kwargs)
 def send_emails(text, **kwargs): return send(text, "emails", **kwargs)
 def send_jobs(text, **kwargs):   return send(text, "jobs",   **kwargs)
