@@ -20,6 +20,12 @@ from linkedin_post import post_from_topic
 from job_tracker import format_status_report, handle_update_command
 import subprocess
 
+# Line-buffer stdout/stderr so `print()` shows up in assistant.log in real time —
+# launchd redirects them to a file, which Python block-buffers by default,
+# making the log look frozen even while the process is actively running.
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 # Runtime paths — resolved dynamically so the repo works on any machine
 BASE       = Path(__file__).parent
 PYTHON     = sys.executable
@@ -160,7 +166,22 @@ def send_message(text, parse_mode="Markdown", thread_id=None, src_chat_id=None, 
             payload["message_thread_id"] = effective_thread
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
+    if payload.get("parse_mode") is None:
+        # Telegram rejects an explicit null parse_mode ("unsupported parse_mode") —
+        # it must be omitted entirely to send plain, unparsed text.
+        payload.pop("parse_mode", None)
     resp = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
+    if not resp.ok:
+        print(f"send_message failed: {resp.status_code} {resp.text}")
+        if resp.status_code == 429:
+            # Rate-limited — Telegram tells us how long to back off
+            retry_after = resp.json().get("parameters", {}).get("retry_after", 2)
+            time.sleep(retry_after + 0.5)
+        else:
+            time.sleep(1)
+        resp = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
+        if not resp.ok:
+            print(f"send_message retry also failed: {resp.status_code} {resp.text}")
     return resp.ok
 
 
@@ -199,10 +220,15 @@ def handle_email_callback(update):
     is_send  = data.startswith("em_send_")
     draft_id = data[len("em_send_"):] if is_send else data[len("em_cancel_"):]
     draft    = PENDING_EMAIL_DRAFTS.pop(draft_id, None)
+    print(f"[email-callback] data={data} draft_id={draft_id} found_draft={draft is not None} known_drafts={list(PENDING_EMAIL_DRAFTS.keys())}")
 
     if not draft:
         requests.post(f"{TELEGRAM_API}/answerCallbackQuery",
                        json={"callback_query_id": cb_id, "text": "Draft expired or already handled."})
+        send_message(
+            "⚠️ That draft is no longer available (bot restarted since, or it was already sent/cancelled).",
+            thread_id=thread_id, src_chat_id=chat_id
+        )
         return
 
     if not is_send:
@@ -1030,6 +1056,8 @@ def run():
                 # Intercept a native Telegram "reply" to a fetched email -> draft + send an email reply
                 _reply_to = msg.get("reply_to_message") or {}
                 _reply_to_id = str(_reply_to.get("message_id", ""))
+                if _reply_to_id:
+                    print(f"[email-reply-check] reply_to_message_id={_reply_to_id} in_index={_reply_to_id in EMAIL_INDEX} known_ids={list(EMAIL_INDEX.keys())}")
                 if _reply_to_id in EMAIL_INDEX and not text.startswith("/"):
                     try:
                         import uuid
@@ -1050,7 +1078,7 @@ def run():
                             "in_reply_to":  original.get("message_id") or None,
                             "references":   _references,
                         }
-                        send_message(
+                        _sent_ok = send_message(
                             f"✉️ Draft reply to {original.get('from_addr', '')}\n"
                             f"Subject: {subject}\n\n{polished}",
                             parse_mode=None, thread_id=thread_id, src_chat_id=src_chat_id,
@@ -1059,7 +1087,9 @@ def run():
                                 {"text": "❌ Cancel", "callback_data": f"em_cancel_{draft_id}"}
                             ]]}
                         )
+                        print(f"[email-reply-check] draft_id={draft_id} send_message_ok={_sent_ok}")
                     except Exception as e:
+                        print(f"[email-reply-check] EXCEPTION: {e!r}")
                         send_message(f"⚠️ Couldn't draft that reply: {e}", thread_id=thread_id, src_chat_id=src_chat_id)
                     continue
 
