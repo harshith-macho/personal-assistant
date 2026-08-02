@@ -27,6 +27,7 @@ STAGE_EMOJI = {
     "rejected":     "❌",
     "withdrawn":    "🚫",
     "pending":      "⏳",
+    "approved":     "👍",
     "skipped":      "⏭️",
     "manual":       "📎",
     "needs_manual": "⚠️",
@@ -180,6 +181,8 @@ def get_active_applications():
 
 def get_pending_action_jobs():
     """Jobs that are NOT yet applied but need you to do something:
+    'pending' = just found, sent to the Jobs topic, awaiting your Approve/Skip tap.
+    'approved' = you tapped Approve, waiting on /applyjobs to actually submit.
     'manual' = saved for you to apply yourself, resume already generated.
     'needs_manual' = auto-apply failed, waiting on you to pick I'll Apply / Skip.
     """
@@ -187,7 +190,7 @@ def get_pending_action_jobs():
     rows = conn.execute("""
         SELECT ref_id, id, title, company, status, found_at
         FROM jobs
-        WHERE status IN ('manual', 'needs_manual')
+        WHERE status IN ('pending', 'approved', 'manual', 'needs_manual')
         ORDER BY found_at DESC
     """).fetchall()
     conn.close()
@@ -231,7 +234,12 @@ def format_status_report():
     # Needs your action — NOT counted as applied, kept clearly separate
     if pending_action:
         lines.append(f"*Needs Action ({len(pending_action)}):*")
-        label = {"manual": "saved, not yet applied", "needs_manual": "auto-apply failed"}
+        label = {
+            "pending":      "found, awaiting your approve/skip",
+            "approved":     "approved — run /applyjobs",
+            "manual":       "saved, not yet applied",
+            "needs_manual": "auto-apply failed",
+        }
         for ref_id, job_id, title, company, status, found_at in pending_action[:10]:
             emoji = STAGE_EMOJI.get(status, "•")
             lines.append(f"{emoji} `{ref_id or '—'}` {title[:30]} @ {company[:20]} — {label.get(status, status)}")
