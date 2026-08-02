@@ -194,7 +194,7 @@ def get_updates(offset=None):
     if not resp.ok:
         data = resp.json()
         if data.get("error_code") == 409:
-            print("409 Conflict — another instance running, waiting 60s...")
+            print(f"409 Conflict — full response: {data}")
             time.sleep(60)
         return {"result": []}
     return resp.json()
