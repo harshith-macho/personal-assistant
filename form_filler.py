@@ -38,6 +38,8 @@ PROFILE = {
     "phone":               config.get("PHONE_NUMBER",        "+353899879815"),
     "city":                config.get("APPLICANT_CITY",      "Dublin"),
     "country":             config.get("APPLICANT_COUNTRY",   "Ireland"),
+    "address":             config.get("APPLICANT_ADDRESS",   ""),
+    "postcode":            config.get("APPLICANT_POSTCODE",  ""),
     "linkedin_url":        config.get("LINKEDIN_URL",        ""),
     "github_url":          config.get("GITHUB_URL",          ""),
     "website":             config.get("WEBSITE_URL",         ""),
@@ -62,10 +64,23 @@ def _match_text_value(label: str) -> str | None:
     """Return a fill value for a text/number input based on its label."""
     t = label.lower()
 
+    if "first name" in t or "given name" in t:
+        return PROFILE["first_name"]
+    if "last name" in t or "surname" in t or "family name" in t:
+        return PROFILE["last_name"]
+    if "full name" in t or ("name" in t and "first" not in t and "last" not in t
+                             and "company" not in t and "user" not in t):
+        return PROFILE["full_name"]
+    if "email" in t:
+        return PROFILE["email"]
     if any(k in t for k in ["phone", "mobile", "contact number"]):
         return PROFILE["phone"]
-    if "city" in t and "country" not in t:
+    if any(k in t for k in ["town", "city"]) and "country" not in t:
         return PROFILE["city"]
+    if any(k in t for k in ["postcode", "postal code", "zip code", "eircode"]):
+        return PROFILE["postcode"]
+    if "address" in t:
+        return PROFILE["address"]
     if "country" in t:
         return PROFILE["country"]
     if "linkedin" in t and "url" in t:
@@ -249,6 +264,25 @@ async def fill_form_step(page, extra_answers: dict | None = None, job: dict | No
                         await radio.click()
                         filled.append(f"{question}: {answer}")
                         break
+            except Exception:
+                continue
+
+        # ── 2b. Required checkboxes (consent / terms / accuracy declarations) ──
+        # Legally, a *required* checkbox on an application can only be a legal/consent
+        # condition of applying (privacy policy, data processing, accuracy of info) —
+        # opt-in marketing checkboxes cannot be required. Safe to auto-check.
+        checkboxes = await page.query_selector_all(
+            "input[type='checkbox'][required], input[type='checkbox'][aria-required='true']"
+        )
+        for cb in checkboxes:
+            try:
+                if not await cb.is_visible() or not await cb.is_enabled():
+                    continue
+                if await cb.is_checked():
+                    continue
+                label = await _get_label(page, cb)
+                await cb.check()
+                filled.append(f"{label or 'required checkbox'}: [checked]")
             except Exception:
                 continue
 

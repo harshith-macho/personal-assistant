@@ -692,6 +692,12 @@ _SUCCESS_SIGNALS = [
     "we've received your application", "successfully submitted",
     "you have applied", "application was submitted", "your application has been",
     "thanks for applying", "received your application",
+    "submitted successfully", "successfully applied", "application successful",
+    "thank you for your interest", "we'll be in touch", "we will be in touch",
+    "you're all set", "you are all set", "application confirmed",
+    "we've got your application", "submission has been received",
+    "candidacy has been submitted", "thanks for your application",
+    "application has been received", "we have received your application",
 ]
 
 def _is_success_page(body: str) -> bool:
@@ -706,35 +712,40 @@ async def _ats_click_next(page) -> str | None:
     """
     result = await page.evaluate("""() => {
         const priority = [
-            ['Submit application', 'submit'],
-            ['Submit Application', 'submit'],
-            ['Submit', 'submit'],
-            ['Apply now', 'submit'],
-            ['Apply Now', 'submit'],
-            ['Complete application', 'submit'],
-            ['Send application', 'submit'],
-            ['Review', 'review'],
-            ['Continue', 'next'],
-            ['Next', 'next'],
-            ['Next step', 'next'],
-            ['Next Step', 'next'],
-            ['Save and continue', 'next'],
-            ['Save & Continue', 'next'],
+            ['submit application', 'submit'],
+            ['submit my application', 'submit'],
+            ['submit', 'submit'],
+            ['apply now', 'submit'],
+            ['complete application', 'submit'],
+            ['send application', 'submit'],
+            ['finish application', 'submit'],
+            ['confirm and submit', 'submit'],
+            ['i agree and submit', 'submit'],
+            ['review', 'review'],
+            ['review application', 'review'],
+            ['continue to next step', 'next'],
+            ['continue', 'next'],
+            ['next', 'next'],
+            ['next step', 'next'],
+            ['save and continue', 'next'],
+            ['finish', 'next'],
         ];
         for (const [label, action] of priority) {
             for (const btn of document.querySelectorAll('button, input[type=submit], a[role=button]')) {
-                const t = (btn.innerText || btn.value || '').trim();
-                const a = btn.getAttribute('aria-label') || '';
+                if (btn.disabled) continue;
+                const t = (btn.innerText || btn.value || '').trim().toLowerCase();
+                const a = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
                 if (t === label || a === label) {
                     btn.click();
                     return action;
                 }
             }
         }
-        // Fuzzy: any visible button whose text contains submit/apply
+        // Fuzzy: any visible, enabled button whose text contains submit/apply
         for (const btn of document.querySelectorAll('button, input[type=submit]')) {
+            if (btn.disabled) continue;
             const t = (btn.innerText || btn.value || '').trim().toLowerCase();
-            if ((t.includes('submit') || t.includes('apply')) && !btn.disabled) {
+            if (t.includes('submit') || t.includes('apply')) {
                 btn.click();
                 return 'submit';
             }
@@ -857,6 +868,16 @@ async def try_ats_apply(context, external_url: str, job: dict) -> bool:
                 if any(s in page.url.lower() for s in ["success", "confirm", "thank", "submitted"]):
                     print(f"  ✅ [{ats_name}] Applied (URL redirect): {job['title']}")
                     return True
+                # Some "Apply"/"Apply Now" buttons just reveal or navigate to the
+                # real application form instead of truly submitting (e.g. Ashby's
+                # "Apply for this Job", Accenture's "Apply") — if real fillable
+                # fields are present, this wasn't a final submission; keep going.
+                still_has_form = await page.evaluate("""() => document.querySelectorAll(
+                    "input[type='text'], input[type='email'], input[type='tel'], textarea, input[type='file']"
+                ).length > 0""")
+                if still_has_form:
+                    print(f"  [{ats_name}] '{clicked}' revealed a form instead of submitting — continuing")
+                    continue
                 print(f"  [{ats_name}] Submit clicked but no confirmation detected")
                 break
 
@@ -1098,7 +1119,10 @@ async def apply_to_job(page, job, resume_path=None, extra_answers=None):
             # Upload resume if this step has a file input and we haven't uploaded yet
             if resume_path and not resume_uploaded:
                 try:
-                    file_input = await page.query_selector('[role="dialog"] input[type="file"]')
+                    file_input = (
+                        await page.query_selector(f'{modal_sel} input[type="file"]')
+                        or await page.query_selector('input[type="file"]')
+                    )
                     if file_input:
                         await file_input.set_input_files(resume_path)
                         await page.wait_for_timeout(3000)  # wait for dynamic fields to render
@@ -1219,6 +1243,8 @@ async def apply_to_job(page, job, resume_path=None, extra_answers=None):
 
         return False, None
 
+    except SessionExpiredError:
+        raise
     except Exception as e:
         import traceback
         print(f"  [APPLY ERROR] {job['title']}: {e}")
